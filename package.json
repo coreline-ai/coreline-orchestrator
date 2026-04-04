@@ -1,0 +1,24 @@
+{
+  "name": "coreline-orchestrator",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "bun@1.3.11",
+  "main": "dist/index.js",
+  "module": "dist/index.js",
+  "scripts": {
+    "build": "bunx tsc -p tsconfig.json",
+    "dev": "bun --watch src/index.ts",
+    "start": "bun dist/index.js",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "hono": "latest",
+    "ulid": "latest",
+    "zod": "latest"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "latest"
+  }
+}

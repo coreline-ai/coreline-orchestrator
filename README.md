@@ -1,23 +1,19 @@
 <div align="center">
-
-# 🎛️ Coreline Orchestrator
-
-**Multi-worker orchestration framework for CodexCode CLI**
-
-[![TypeScript](https://img.shields.io/badge/TypeScript-ESNext-3178C6?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
-[![Bun](https://img.shields.io/badge/Bun-Runtime-f9f1e1?style=flat-square&logo=bun&logoColor=black)](https://bun.sh/)
-[![Hono](https://img.shields.io/badge/Hono-HTTP-E36002?style=flat-square&logo=hono&logoColor=white)](https://hono.dev/)
-[![License](https://img.shields.io/badge/License-Private-red?style=flat-square)](#)
-[![Phase](https://img.shields.io/badge/Status-Phase_0_In_Progress-yellow?style=flat-square)](#-roadmap)
-
-<br />
-
-> *Orchestrate many. Execute in isolation. Aggregate with confidence.*
-
-<br />
-
-[Getting Started](#-getting-started) · [Architecture](#-architecture) · [API Reference](#-api-reference) · [Documentation](#-documentation) · [Roadmap](#-roadmap)
-
+  <h1>🎛️ Coreline Orchestrator</h1>
+  <p><strong>Multi-worker orchestration framework for CodexCode CLI</strong></p>
+  <p>
+    <a href="https://www.typescriptlang.org/"><img src="https://img.shields.io/badge/TypeScript-ESNext-3178C6?style=flat-square&logo=typescript&logoColor=white" alt="TypeScript" /></a>
+    <a href="https://bun.sh/"><img src="https://img.shields.io/badge/Bun-Runtime-f9f1e1?style=flat-square&logo=bun&logoColor=black" alt="Bun" /></a>
+    <a href="https://hono.dev/"><img src="https://img.shields.io/badge/Hono-HTTP-E36002?style=flat-square&logo=hono&logoColor=white" alt="Hono" /></a>
+    <img src="https://img.shields.io/badge/License-Private-red?style=flat-square" alt="License" />
+    <a href="#-roadmap"><img src="https://img.shields.io/badge/Status-Phase_0_In_Progress-yellow?style=flat-square" alt="Phase" /></a>
+  </p>
+  <br />
+  <p><em>Orchestrate many. Execute in isolation. Aggregate with confidence.</em></p>
+  <br />
+  <p>
+    <a href="#-getting-started">Getting Started</a> · <a href="#-architecture">Architecture</a> · <a href="#-api-reference">API Reference</a> · <a href="#-documentation">Documentation</a> · <a href="#-roadmap">Roadmap</a>
+  </p>
 </div>
 
 ---
@@ -479,7 +475,5 @@ bunx tsc --noEmit    # Type check only
 ---
 
 <div align="center">
-
-Built with [Bun](https://bun.sh/) + [Hono](https://hono.dev/) + [TypeScript](https://www.typescriptlang.org/)
-
+  <p>Built with <a href="https://bun.sh/">Bun</a> + <a href="https://hono.dev/">Hono</a> + <a href="https://www.typescriptlang.org/">TypeScript</a></p>
 </div>

@@ -2,12 +2,39 @@ import type { ExecutionMode } from '../core/models.js'
 import { InvalidConfigurationError } from '../core/errors.js'
 
 export type ApiExposureMode = 'trusted_local' | 'untrusted_network'
+export type StateStoreBackend = 'file' | 'sqlite'
+export type ApiPrincipalActorType = 'operator' | 'service'
+export type ControlPlaneBackend = 'memory' | 'sqlite'
+export type DispatchQueueBackend = 'memory' | 'sqlite'
+export type EventStreamBackend = 'memory' | 'state_store_polling'
+export type ArtifactTransportMode = 'shared_filesystem' | 'object_store_manifest'
+
+export interface ApiAuthTokenConfig {
+  tokenId: string
+  token: string
+  subject: string
+  actorType: ApiPrincipalActorType
+  scopes: string[]
+  repoPaths?: string[]
+  jobIds?: string[]
+  sessionIds?: string[]
+}
 
 export interface OrchestratorConfig {
   apiHost: string
   apiPort: number
   apiExposure: ApiExposureMode
   apiAuthToken?: string
+  apiAuthTokens?: ApiAuthTokenConfig[]
+  controlPlaneBackend: ControlPlaneBackend
+  controlPlaneSqlitePath?: string
+  dispatchQueueBackend: DispatchQueueBackend
+  dispatchQueueSqlitePath?: string
+  eventStreamBackend: EventStreamBackend
+  stateStoreBackend: StateStoreBackend
+  stateStoreImportFromFile: boolean
+  stateStoreSqlitePath?: string
+  artifactTransportMode: ArtifactTransportMode
   maxActiveWorkers: number
   maxWriteWorkersPerRepo: number
   allowedRepoRoots: string[]
@@ -21,6 +48,12 @@ const defaultConfig: OrchestratorConfig = {
   apiHost: '127.0.0.1',
   apiPort: 3100,
   apiExposure: 'trusted_local',
+  controlPlaneBackend: 'memory',
+  dispatchQueueBackend: 'memory',
+  eventStreamBackend: 'memory',
+  stateStoreBackend: 'file',
+  stateStoreImportFromFile: false,
+  artifactTransportMode: 'shared_filesystem',
   maxActiveWorkers: 4,
   maxWriteWorkersPerRepo: 1,
   allowedRepoRoots: [],
@@ -41,6 +74,34 @@ export function loadConfig(
       defaultConfig.apiExposure,
     ),
     apiAuthToken: normalizeOptionalString(env.ORCH_API_TOKEN),
+    apiAuthTokens: parseApiAuthTokens(env.ORCH_API_TOKENS),
+    controlPlaneBackend: parseControlPlaneBackend(
+      env.ORCH_CONTROL_BACKEND,
+      defaultConfig.controlPlaneBackend,
+    ),
+    controlPlaneSqlitePath: normalizeOptionalString(env.ORCH_CONTROL_SQLITE_PATH),
+    dispatchQueueBackend: parseDispatchQueueBackend(
+      env.ORCH_QUEUE_BACKEND,
+      defaultConfig.dispatchQueueBackend,
+    ),
+    dispatchQueueSqlitePath: normalizeOptionalString(env.ORCH_QUEUE_SQLITE_PATH),
+    eventStreamBackend: parseEventStreamBackend(
+      env.ORCH_EVENT_STREAM_BACKEND,
+      defaultConfig.eventStreamBackend,
+    ),
+    stateStoreBackend: parseStateStoreBackend(
+      env.ORCH_STATE_BACKEND,
+      defaultConfig.stateStoreBackend,
+    ),
+    stateStoreImportFromFile: parseBoolean(
+      env.ORCH_STATE_IMPORT_FROM_FILE,
+      defaultConfig.stateStoreImportFromFile,
+    ),
+    stateStoreSqlitePath: normalizeOptionalString(env.ORCH_STATE_SQLITE_PATH),
+    artifactTransportMode: parseArtifactTransportMode(
+      env.ORCH_ARTIFACT_TRANSPORT,
+      defaultConfig.artifactTransportMode,
+    ),
     maxActiveWorkers: parsePositiveInteger(
       env.ORCH_MAX_WORKERS,
       defaultConfig.maxActiveWorkers,
@@ -67,11 +128,12 @@ export function loadConfig(
 export function assertSafeApiConfig(config: OrchestratorConfig): void {
   if (
     config.apiExposure === 'untrusted_network' &&
-    normalizeOptionalString(config.apiAuthToken) === undefined
+    normalizeOptionalString(config.apiAuthToken) === undefined &&
+    (config.apiAuthTokens?.length ?? 0) === 0
   ) {
     throw new InvalidConfigurationError(
       'ORCH_API_TOKEN',
-      'External API exposure requires ORCH_API_TOKEN.',
+      'External API exposure requires ORCH_API_TOKEN or ORCH_API_TOKENS.',
     )
   }
 }
@@ -110,6 +172,23 @@ function normalizeOptionalString(
   return trimmed === undefined || trimmed === '' ? undefined : trimmed
 }
 
+function parseBoolean(rawValue: string | undefined, fallback: boolean): boolean {
+  if (rawValue === undefined || rawValue.trim() === '') {
+    return fallback
+  }
+
+  const normalized = rawValue.trim().toLowerCase()
+  if (normalized === '1' || normalized === 'true' || normalized === 'yes') {
+    return true
+  }
+
+  if (normalized === '0' || normalized === 'false' || normalized === 'no') {
+    return false
+  }
+
+  return fallback
+}
+
 function parseApiExposureMode(
   rawValue: string | undefined,
   fallback: ApiExposureMode,
@@ -119,6 +198,165 @@ function parseApiExposureMode(
   }
 
   return fallback
+}
+
+function parseApiAuthTokens(
+  rawValue: string | undefined,
+): ApiAuthTokenConfig[] {
+  const normalized = normalizeOptionalString(rawValue)
+  if (normalized === undefined) {
+    return []
+  }
+
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(normalized)
+  } catch {
+    throw new InvalidConfigurationError(
+      'ORCH_API_TOKENS',
+      'ORCH_API_TOKENS must be valid JSON.',
+    )
+  }
+
+  if (!Array.isArray(parsed)) {
+    throw new InvalidConfigurationError(
+      'ORCH_API_TOKENS',
+      'ORCH_API_TOKENS must be a JSON array.',
+    )
+  }
+
+  return parsed.map((entry, index) => {
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
+      throw new InvalidConfigurationError(
+        'ORCH_API_TOKENS',
+        `Token entry ${index} must be an object.`,
+      )
+    }
+
+    const tokenId = normalizeOptionalString(readStringField(entry, 'token_id'))
+    const token = normalizeOptionalString(readStringField(entry, 'token'))
+    const subject =
+      normalizeOptionalString(readStringField(entry, 'subject')) ??
+      tokenId
+    const actorType = readActorType(entry)
+    const scopes = readStringArrayField(entry, 'scopes')
+    const repoPaths = readOptionalStringArrayField(entry, 'repo_paths')
+    const jobIds = readOptionalStringArrayField(entry, 'job_ids')
+    const sessionIds = readOptionalStringArrayField(entry, 'session_ids')
+
+    if (tokenId === undefined || token === undefined || subject === undefined) {
+      throw new InvalidConfigurationError(
+        'ORCH_API_TOKENS',
+        `Token entry ${index} requires token_id, token, and subject/token_id.`,
+      )
+    }
+
+    return {
+      tokenId,
+      token,
+      subject,
+      actorType,
+      scopes: scopes.length === 0 ? ['*'] : scopes,
+      ...(repoPaths === undefined ? {} : { repoPaths }),
+      ...(jobIds === undefined ? {} : { jobIds }),
+      ...(sessionIds === undefined ? {} : { sessionIds }),
+    }
+  })
+}
+
+function parseStateStoreBackend(
+  rawValue: string | undefined,
+  fallback: StateStoreBackend,
+): StateStoreBackend {
+  if (rawValue === 'file' || rawValue === 'sqlite') {
+    return rawValue
+  }
+
+  return fallback
+}
+
+function parseControlPlaneBackend(
+  rawValue: string | undefined,
+  fallback: ControlPlaneBackend,
+): ControlPlaneBackend {
+  if (rawValue === 'memory' || rawValue === 'sqlite') {
+    return rawValue
+  }
+
+  return fallback
+}
+
+function parseDispatchQueueBackend(
+  rawValue: string | undefined,
+  fallback: DispatchQueueBackend,
+): DispatchQueueBackend {
+  if (rawValue === 'memory' || rawValue === 'sqlite') {
+    return rawValue
+  }
+
+  return fallback
+}
+
+function parseEventStreamBackend(
+  rawValue: string | undefined,
+  fallback: EventStreamBackend,
+): EventStreamBackend {
+  if (rawValue === 'memory' || rawValue === 'state_store_polling') {
+    return rawValue
+  }
+
+  return fallback
+}
+
+function parseArtifactTransportMode(
+  rawValue: string | undefined,
+  fallback: ArtifactTransportMode,
+): ArtifactTransportMode {
+  if (rawValue === 'shared_filesystem' || rawValue === 'object_store_manifest') {
+    return rawValue
+  }
+
+  return fallback
+}
+
+function readStringField(
+  value: Record<string, unknown>,
+  field: string,
+): string | undefined {
+  const candidate = value[field]
+  return typeof candidate === 'string' ? candidate : undefined
+}
+
+function readStringArrayField(
+  value: Record<string, unknown>,
+  field: string,
+): string[] {
+  const candidate = value[field]
+  if (!Array.isArray(candidate)) {
+    return []
+  }
+
+  return candidate
+    .filter((entry): entry is string => typeof entry === 'string')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0)
+}
+
+function readOptionalStringArrayField(
+  value: Record<string, unknown>,
+  field: string,
+): string[] | undefined {
+  const items = readStringArrayField(value, field)
+  return items.length === 0 ? undefined : items
+}
+
+function readActorType(
+  value: Record<string, unknown>,
+): ApiPrincipalActorType {
+  const rawValue = value.actor_type
+  return rawValue === 'operator' || rawValue === 'service'
+    ? rawValue
+    : 'service'
 }
 
 function parseExecutionMode(

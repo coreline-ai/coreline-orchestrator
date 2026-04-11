@@ -1,4 +1,5 @@
 import { join } from 'node:path'
+import { hostname } from 'node:os'
 
 import type { Hono } from 'hono'
 
@@ -9,7 +10,11 @@ import {
   loadConfig,
   type OrchestratorConfig,
 } from './config/config.js'
-import { EventBus } from './core/eventBus.js'
+import { createControlPlaneCoordinator } from './control/createCoordinator.js'
+import type { ControlPlaneCoordinator } from './control/coordination.js'
+import { createEventStream } from './core/createEventStream.js'
+import type { EventStream } from './core/eventBus.js'
+import { generateExecutorId } from './core/ids.js'
 import { WorktreeManager } from './isolation/worktreeManager.js'
 import { LogCollector } from './logs/logCollector.js'
 import { LogIndex } from './logs/logIndex.js'
@@ -17,8 +22,11 @@ import { CleanupManager } from './reconcile/cleanup.js'
 import { Reconciler } from './reconcile/reconciler.js'
 import { ResultAggregator } from './results/resultAggregator.js'
 import { ProcessRuntimeAdapter } from './runtime/processRuntimeAdapter.js'
+import { createDispatchQueue } from './scheduler/createQueue.js'
 import { Scheduler } from './scheduler/scheduler.js'
-import { FileStateStore } from './storage/fileStateStore.js'
+import { SessionManager } from './sessions/sessionManager.js'
+import { createStateStore } from './storage/createStateStore.js'
+import type { StateStore } from './storage/types.js'
 import { WorkerManager } from './workers/workerManager.js'
 
 export interface StartOrchestratorOptions {
@@ -26,6 +34,10 @@ export interface StartOrchestratorOptions {
   enableServer?: boolean
   stateRootDir?: string
   version?: string
+  autoStartLoops?: boolean
+  controlPlaneCoordinator?: ControlPlaneCoordinator
+  executorId?: string
+  hostId?: string
 }
 
 export interface OrchestratorRuntime {
@@ -35,9 +47,13 @@ export interface OrchestratorRuntime {
   app: Hono
   server: OrchestratorServer | null
   scheduler: Scheduler
+  sessionManager: SessionManager
   workerManager: WorkerManager
-  stateStore: FileStateStore
-  eventBus: EventBus
+  stateStore: StateStore
+  eventBus: EventStream
+  controlPlaneCoordinator: ControlPlaneCoordinator
+  executorId: string
+  executorHeartbeatTimer: ReturnType<typeof setInterval>
   logIndex: LogIndex
   cleanupManager: CleanupManager
   reconciler: Reconciler
@@ -49,28 +65,54 @@ export function getCurrentRuntime(): OrchestratorRuntime | null {
   return currentRuntime
 }
 
-export async function startOrchestrator(
+export async function createOrchestratorRuntime(
   options: StartOrchestratorOptions = {},
 ): Promise<OrchestratorRuntime> {
-  if (currentRuntime?.status === 'running') {
-    return currentRuntime
-  }
-
   const config = options.config ?? loadConfig()
   assertSafeApiConfig(config)
   const startedAt = new Date().toISOString()
-  const stateStore = new FileStateStore(
+  const runtimeRootDir =
     options.stateRootDir ??
-      join(process.cwd(), config.orchestratorRootDir),
+    join(process.cwd(), config.orchestratorRootDir)
+  const stateStore = createStateStore(
+    config,
+    runtimeRootDir,
   )
   await stateStore.initialize()
 
-  const eventBus = new EventBus()
+  const eventBus = createEventStream(config, stateStore)
+  const controlPlaneCoordinator =
+    options.controlPlaneCoordinator ??
+    createControlPlaneCoordinator(config, runtimeRootDir)
+  if (
+    'initialize' in controlPlaneCoordinator &&
+    typeof controlPlaneCoordinator.initialize === 'function'
+  ) {
+    await controlPlaneCoordinator.initialize()
+  }
+  const executorId = options.executorId ?? generateExecutorId()
+  await controlPlaneCoordinator.registerExecutor({
+    executorId,
+    hostId: options.hostId ?? hostname(),
+    processId: process.pid,
+    roles: ['scheduler', 'worker'],
+    capabilities: {
+      executionModes: [config.workerMode],
+      supportsSameSessionReattach: config.workerMode === 'session',
+    },
+    metadata: {
+      stateStoreBackend: config.stateStoreBackend,
+    },
+  })
   const runtimeAdapter = new ProcessRuntimeAdapter(config)
   const worktreeManager = new WorktreeManager(config.orchestratorRootDir)
   const logCollector = new LogCollector()
   const logIndex = new LogIndex()
   const resultAggregator = new ResultAggregator()
+  const sessionManager = new SessionManager({
+    stateStore,
+    eventBus,
+  })
   const workerManager = new WorkerManager({
     stateStore,
     runtimeAdapter,
@@ -79,12 +121,40 @@ export async function startOrchestrator(
     resultAggregator,
     eventBus,
     config,
+    sessionManager,
+    controlPlane: {
+      coordinator: controlPlaneCoordinator,
+      executorId,
+      heartbeatIntervalMs: 1_000,
+      heartbeatTtlMs: 5_000,
+    },
   })
+  sessionManager.bindWorkerStopper((workerId, reason) =>
+    workerManager.stopWorker(workerId, reason),
+  )
+  sessionManager.bindRuntimeBridge({
+    attach: (session, _worker, input) =>
+      workerManager.attachSessionRuntime(session, input),
+    detach: (session, _worker, input) =>
+      workerManager.detachSessionRuntime(session, input),
+    sendInput: (session, _worker, input) =>
+      workerManager.sendSessionInput(session, input),
+    readOutput: (session, _worker, request) =>
+      workerManager.readSessionOutput(session, request),
+  })
+  const dispatchQueue = createDispatchQueue(config, runtimeRootDir)
   const scheduler = new Scheduler({
     stateStore,
     workerManager,
+    queue: dispatchQueue,
     eventBus,
     config,
+    controlPlane: {
+      coordinator: controlPlaneCoordinator,
+      executorId,
+      leaseKey: 'scheduler:dispatch',
+      leaseTtlMs: 5_000,
+    },
   })
   const cleanupManager = new CleanupManager({
     stateStore,
@@ -96,17 +166,26 @@ export async function startOrchestrator(
     scheduler,
     eventBus,
     resultAggregator,
+    runtimeRecoveryManager: workerManager,
+    sessionManager,
     cleanupManager,
+    controlPlane: {
+      coordinator: controlPlaneCoordinator,
+    },
   })
   await reconciler.reconcile({ forceRuntimeRecovery: true })
-  scheduler.start()
-  reconciler.startPeriodicReconciliation()
+  await sessionManager.reconcileSessions()
+  if (options.autoStartLoops !== false) {
+    scheduler.start()
+    reconciler.startPeriodicReconciliation()
+  }
 
   const app = createApp({
     config,
     stateStore,
     workerManager,
     scheduler,
+    sessionManager,
     eventBus,
     logIndex,
     startedAt,
@@ -115,35 +194,103 @@ export async function startOrchestrator(
 
   const server =
     options.enableServer === false ? null : startServer(app, config)
+  const executorHeartbeatTimer = setInterval(() => {
+    void controlPlaneCoordinator.heartbeatExecutor(executorId)
+  }, 1_000)
 
-  currentRuntime = {
+  return {
     startedAt,
     status: 'running',
     config,
     app,
     server,
     scheduler,
+    sessionManager,
     workerManager,
     stateStore,
     eventBus,
+    controlPlaneCoordinator,
+    executorId,
+    executorHeartbeatTimer,
     logIndex,
     cleanupManager,
     reconciler,
   }
+}
 
+export async function startOrchestrator(
+  options: StartOrchestratorOptions = {},
+): Promise<OrchestratorRuntime> {
+  if (currentRuntime?.status === 'running') {
+    return currentRuntime
+  }
+
+  currentRuntime = await createOrchestratorRuntime(options)
   return currentRuntime
 }
 
-export async function stopOrchestrator(): Promise<void> {
-  if (!currentRuntime) {
+export async function stopRuntime(runtime: OrchestratorRuntime): Promise<void> {
+  if (runtime.status === 'stopped') {
     return
   }
 
-  if (currentRuntime.server !== null) {
-    await Promise.resolve(currentRuntime.server.stop(true))
+  if (runtime.server !== null) {
+    await Promise.resolve(runtime.server.stop(true))
   }
-  currentRuntime.scheduler.stop()
-  currentRuntime.reconciler.stop()
+  runtime.scheduler.stop()
+  runtime.reconciler.stop()
+  clearInterval(runtime.executorHeartbeatTimer)
+
+  const activeAssignments = await runtime.controlPlaneCoordinator.listWorkerAssignments({
+    includeReleased: false,
+    includeStale: true,
+  })
+  const ownedWorkerIds = new Set(
+    activeAssignments
+      .filter((assignment) => assignment.executorId === runtime.executorId)
+      .map((assignment) => assignment.workerId),
+  )
+  for (const workerId of ownedWorkerIds) {
+    await runtime.workerManager.stopWorker(workerId, 'executor_shutdown')
+  }
+
+  const workers = await runtime.stateStore.listWorkers()
+  await Promise.all(
+    workers
+      .filter(
+        (worker) => ownedWorkerIds.has(worker.workerId),
+      )
+      .map((worker) =>
+        runtime.workerManager.waitForWorkerSettlement(worker.workerId),
+      ),
+  )
+  await runtime.sessionManager.closeOpenSessions('orchestrator_shutdown')
+  await runtime.controlPlaneCoordinator.unregisterExecutor(
+    runtime.executorId,
+  )
+  const queue = runtime.scheduler.getQueue()
+  if ('close' in queue && typeof queue.close === 'function') {
+    queue.close()
+  }
+  if ('close' in runtime.eventBus && typeof runtime.eventBus.close === 'function') {
+    runtime.eventBus.close()
+  }
+  if ('close' in runtime.controlPlaneCoordinator && typeof runtime.controlPlaneCoordinator.close === 'function') {
+    runtime.controlPlaneCoordinator.close()
+  }
+  await runtime.stateStore.close?.()
+  runtime.status = 'stopped'
+  runtime.server = null
+
+  if (currentRuntime === runtime) {
+    currentRuntime = runtime
+  }
+}
+
+export async function stopOrchestrator(): Promise<void> {
+  if (!currentRuntime || currentRuntime.status === 'stopped') {
+    return
+  }
 
   const jobs = await currentRuntime.stateStore.listJobs()
   for (const job of jobs) {
@@ -159,26 +306,7 @@ export async function stopOrchestrator(): Promise<void> {
     await currentRuntime.scheduler.cancelJob(job.jobId, 'orchestrator_shutdown')
   }
 
-  const workers = await currentRuntime.stateStore.listWorkers()
-  await Promise.all(
-    workers
-      .filter(
-        (worker) =>
-          worker.status === 'created' ||
-          worker.status === 'starting' ||
-          worker.status === 'active' ||
-          worker.status === 'finishing',
-      )
-      .map((worker) =>
-        currentRuntime?.workerManager.waitForWorkerSettlement(worker.workerId),
-      ),
-  )
-
-  currentRuntime = {
-    ...currentRuntime,
-    status: 'stopped',
-    server: null,
-  }
+  await stopRuntime(currentRuntime)
 }
 
 if (import.meta.main) {

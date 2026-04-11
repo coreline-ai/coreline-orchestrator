@@ -9,6 +9,7 @@ import { createEvent } from '../core/events.js'
 import { generateWorkerId } from '../core/ids.js'
 import {
   JobStatus,
+  SessionStatus,
   WorkerStatus,
   type JobRecord,
   type WorkerRecord,
@@ -17,13 +18,22 @@ import { LogIndex } from '../logs/logIndex.js'
 import { CapacityPolicy, ConflictPolicy, RetryPolicy } from '../scheduler/policies.js'
 import { JobQueue } from '../scheduler/queue.js'
 import { Scheduler, type SchedulerWorkerManager } from '../scheduler/scheduler.js'
+import {
+  SessionManager,
+  type SessionRuntimeBridge,
+} from '../sessions/sessionManager.js'
 import { FileStateStore } from '../storage/fileStateStore.js'
 import type { StateStore } from '../storage/types.js'
-import { createApp } from './server.js'
+import { createApp, startServer, type OrchestratorServer } from './server.js'
 
 const tempDirs: string[] = []
+const servers: OrchestratorServer[] = []
 
 afterEach(async () => {
+  for (const server of servers.splice(0)) {
+    await Promise.resolve(server.stop(true))
+  }
+
   await Promise.all(
     tempDirs.splice(0).map((directoryPath) =>
       rm(directoryPath, { recursive: true, force: true }),
@@ -46,6 +56,13 @@ function createConfig(
     apiPort: 0,
     apiExposure: 'trusted_local',
     apiAuthToken: undefined,
+    controlPlaneBackend: 'memory',
+    dispatchQueueBackend: 'memory',
+    eventStreamBackend: 'memory',
+    stateStoreBackend: 'file',
+    stateStoreImportFromFile: false,
+    stateStoreSqlitePath: undefined,
+    artifactTransportMode: 'shared_filesystem',
     maxActiveWorkers: 2,
     maxWriteWorkersPerRepo: 1,
     allowedRepoRoots,
@@ -120,7 +137,7 @@ class FakeWorkerManager implements SchedulerWorkerManager {
     return { workerId: worker.workerId }
   }
 
-  async stopWorker(workerId: string): Promise<void> {
+  async stopWorker(workerId: string, _reason?: string): Promise<void> {
     this.stoppedWorkers.push(workerId)
     const worker = await this.stateStore.getWorker(workerId)
     if (worker !== null) {
@@ -135,14 +152,32 @@ class FakeWorkerManager implements SchedulerWorkerManager {
 
 async function createApiHarness(
   configOverrides: Partial<OrchestratorConfig> = {},
+  options: {
+    sessionRuntimeBridge?: SessionRuntimeBridge
+    repoPath?: string
+  } = {},
 ) {
-  const repoPath = await createTempDir('coreline-orch-api-repo-')
+  const repoPath =
+    options.repoPath ?? (await createTempDir('coreline-orch-api-repo-'))
+  if (!tempDirs.includes(repoPath)) {
+    tempDirs.push(repoPath)
+  }
   const config = createConfig([repoPath], configOverrides)
   const stateStore = new FileStateStore(join(repoPath, config.orchestratorRootDir))
   await stateStore.initialize()
   const queue = new JobQueue()
   const eventBus = new EventBus()
   const workerManager = new FakeWorkerManager(stateStore, config)
+  const sessionManager = new SessionManager({
+    stateStore,
+    eventBus,
+  })
+  sessionManager.bindWorkerStopper((workerId, reason) =>
+    workerManager.stopWorker(workerId, reason),
+  )
+  if (options.sessionRuntimeBridge !== undefined) {
+    sessionManager.bindRuntimeBridge(options.sessionRuntimeBridge)
+  }
   const scheduler = new Scheduler({
     stateStore,
     workerManager,
@@ -161,6 +196,7 @@ async function createApiHarness(
     stateStore,
     workerManager,
     scheduler,
+    sessionManager,
     eventBus,
     logIndex: new LogIndex(),
     startedAt: '2026-04-11T00:00:00.000Z',
@@ -175,7 +211,27 @@ async function createApiHarness(
     eventBus,
     workerManager,
     scheduler,
+    sessionManager,
     app,
+  }
+}
+
+async function createLiveServerHarness(
+  configOverrides: Partial<OrchestratorConfig> = {},
+  options: {
+    sessionRuntimeBridge?: SessionRuntimeBridge
+    repoPath?: string
+  } = {},
+) {
+  const harness = await createApiHarness(configOverrides, options)
+  const server = startServer(harness.app, harness.config)
+  servers.push(server)
+
+  return {
+    ...harness,
+    server,
+    httpBaseUrl: `http://${harness.config.apiHost}:${server.port}`,
+    wsBaseUrl: `ws://${harness.config.apiHost}:${server.port}`,
   }
 }
 
@@ -291,6 +347,151 @@ describe('api server', () => {
     ).toBe('invalid_token')
 
     expect(authorizedResponse.status).toBe(200)
+  })
+
+  test('named tokens enforce scopes and repo authorization boundaries', async () => {
+    const allowedRepoPath = await createTempDir('coreline-orch-api-allowed-repo-')
+    const deniedRepoPath = await createTempDir('coreline-orch-api-denied-repo-')
+    const { app, stateStore, repoPath } = await createApiHarness(
+      {
+        apiExposure: 'untrusted_network',
+        apiAuthToken: undefined,
+        apiAuthTokens: [
+          {
+            tokenId: 'repo-reader',
+            token: 'repo-reader-token',
+            subject: 'repo-reader',
+            actorType: 'operator',
+            scopes: ['jobs:read', 'workers:read', 'sessions:read', 'events:read'],
+            repoPaths: [allowedRepoPath],
+          },
+        ],
+      },
+      {
+        repoPath: allowedRepoPath,
+      },
+    )
+
+    await seedJob(stateStore, repoPath, {
+      jobId: 'job_scope_allowed',
+    })
+    await seedJob(stateStore, deniedRepoPath, {
+      jobId: 'job_scope_blocked',
+    })
+
+    const listResponse = await app.request('/api/v1/jobs', {
+      headers: {
+        authorization: 'Bearer repo-reader-token',
+      },
+    })
+    const listBody = (await listResponse.json()) as {
+      items: Array<{ job_id: string; title: string }>
+    }
+    expect(listResponse.status).toBe(200)
+    expect(listBody.items).toHaveLength(1)
+    expect(listBody.items[0]).toMatchObject({
+      job_id: 'job_scope_allowed',
+      title: 'API test job',
+    })
+
+    const deniedDetail = await app.request('/api/v1/jobs/job_scope_blocked', {
+      headers: {
+        authorization: 'Bearer repo-reader-token',
+      },
+    })
+    expect(deniedDetail.status).toBe(403)
+    expect(
+      (
+        (await deniedDetail.json()) as {
+          error: { code: string }
+        }
+      ).error.code,
+    ).toBe('AUTHORIZATION_SCOPE_DENIED')
+
+    const deniedWrite = await app.request('/api/v1/jobs', {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer repo-reader-token',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        title: 'Denied write',
+        repo: {
+          path: repoPath,
+        },
+        prompt: {
+          user: 'attempt write',
+        },
+      }),
+    })
+    expect(deniedWrite.status).toBe(403)
+    expect(
+      (
+        (await deniedWrite.json()) as {
+          error: { details?: { required_scope?: string } }
+        }
+      ).error.details?.required_scope,
+    ).toBe('jobs:write')
+  })
+
+  test('named tokens preserve query-token access for SSE and WebSocket event streams', async () => {
+    const { eventBus, stateStore, repoPath, wsBaseUrl, app } =
+      await createLiveServerHarness({
+        apiExposure: 'untrusted_network',
+        apiAuthToken: undefined,
+        apiAuthTokens: [
+          {
+            tokenId: 'events-reader',
+            token: 'events-reader-token',
+            subject: 'events-reader',
+            actorType: 'service',
+            scopes: ['jobs:read', 'events:read'],
+          },
+        ],
+      })
+    await seedJob(stateStore, repoPath, {
+      jobId: 'job_named_token_events',
+      status: JobStatus.Queued,
+    })
+
+    const sseResponse = await app.request(
+      '/api/v1/jobs/job_named_token_events/events?access_token=events-reader-token',
+    )
+    expect(sseResponse.status).toBe(200)
+
+    const socket = await openWebSocket(
+      `${wsBaseUrl}/api/v1/jobs/job_named_token_events/ws?access_token=events-reader-token`,
+    )
+    const collector = createWebSocketCollector(socket)
+    await collector.next((message: any) => message.type === 'hello')
+
+    socket.send(JSON.stringify({
+      type: 'subscribe',
+      cursor: 0,
+      history_limit: 10,
+    }))
+
+    await collector.next((message: any) => message.type === 'subscribed')
+    eventBus.emit(
+      createEvent(
+        'job.updated',
+        { status: 'running' },
+        { jobId: 'job_named_token_events' },
+      ),
+    )
+    expect(
+      await collector.next((message: any) =>
+        message.type === 'event' &&
+        message.event?.event_type === 'job.updated'),
+    ).toMatchObject({
+      type: 'event',
+      event: {
+        job_id: 'job_named_token_events',
+      },
+    })
+
+    socket.close()
+    await waitForWebSocketClose(socket)
   })
 
   test('GET /api/v1/health returns health, capacity, and metrics views', async () => {
@@ -955,8 +1156,300 @@ describe('api server', () => {
     expect(body.status).toBe('active')
   })
 
+  test('session routes create, inspect, attach, detach, and cancel a session', async () => {
+    const { app, repoPath, stateStore, workerManager } = await createApiHarness()
+    await seedJob(stateStore, repoPath, {
+      jobId: 'job_session_api',
+      executionMode: 'session',
+      isolationMode: 'same-dir',
+    })
+    await seedWorker(stateStore, repoPath, {
+      workerId: 'wrk_session_api',
+      jobId: 'job_session_api',
+      runtimeMode: 'session',
+      status: WorkerStatus.Active,
+    })
+
+    const createResponse = await app.request('/api/v1/sessions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        worker_id: 'wrk_session_api',
+        mode: 'session',
+      }),
+    })
+    expect(createResponse.status).toBe(201)
+    const createBody = (await createResponse.json()) as {
+      session_id: string
+      status: string
+    }
+    expect(createBody.status).toBe('attached')
+
+    const detailResponse = await app.request(
+      `/api/v1/sessions/${createBody.session_id}`,
+    )
+    expect(detailResponse.status).toBe(200)
+    const detailBody = (await detailResponse.json()) as {
+      session_id: string
+      worker_id: string
+      mode: string
+      status: string
+      attach_mode: string
+      attached_clients: number
+    }
+    expect(detailBody.session_id).toBe(createBody.session_id)
+    expect(detailBody.worker_id).toBe('wrk_session_api')
+    expect(detailBody.mode).toBe('session')
+    expect(detailBody.status).toBe('attached')
+    expect(detailBody.attach_mode).toBe('interactive')
+    expect(detailBody.attached_clients).toBe(1)
+
+    const attachResponse = await app.request(
+      `/api/v1/sessions/${createBody.session_id}/attach`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          client_id: 'cli_01',
+          mode: 'interactive',
+        }),
+      },
+    )
+    expect(attachResponse.status).toBe(200)
+    expect(
+      (await attachResponse.json()) as { session_id: string; status: string },
+    ).toEqual({
+      session_id: createBody.session_id,
+      status: 'active',
+    })
+
+    const detachResponse = await app.request(
+      `/api/v1/sessions/${createBody.session_id}/detach`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          reason: 'tab closed',
+        }),
+      },
+    )
+    expect(detachResponse.status).toBe(200)
+    expect(
+      (await detachResponse.json()) as { session_id: string; status: string },
+    ).toEqual({
+      session_id: createBody.session_id,
+      status: 'active',
+    })
+
+    const transcriptResponse = await app.request(
+      `/api/v1/sessions/${createBody.session_id}/transcript?limit=20`,
+    )
+    expect(transcriptResponse.status).toBe(200)
+    expect((await transcriptResponse.json()) as {
+      session_id: string
+      items: Array<{ kind: string }>
+      next_after_sequence: number
+    }).toMatchObject({
+      session_id: createBody.session_id,
+      items: [{ kind: 'attach' }, { kind: 'detach' }],
+      next_after_sequence: 2,
+    })
+
+    const diagnosticsResponse = await app.request(
+      `/api/v1/sessions/${createBody.session_id}/diagnostics`,
+    )
+    expect(diagnosticsResponse.status).toBe(200)
+    expect((await diagnosticsResponse.json()) as {
+      session: { session_id: string }
+      transcript: { total_entries: number }
+      health: { stuck: boolean; reasons: string[] }
+    }).toMatchObject({
+      session: {
+        session_id: createBody.session_id,
+      },
+      transcript: {
+        total_entries: 2,
+      },
+      health: {
+        stuck: false,
+      },
+    })
+
+    const cancelResponse = await app.request(
+      `/api/v1/sessions/${createBody.session_id}/cancel`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          reason: 'operator cancel',
+        }),
+      },
+    )
+    expect(cancelResponse.status).toBe(200)
+    expect(
+      (await cancelResponse.json()) as { session_id: string; status: string },
+    ).toEqual({
+      session_id: createBody.session_id,
+      status: 'closed',
+    })
+    expect(workerManager.stoppedWorkers).toContain('wrk_session_api')
+  })
+
+  test('audit route returns persisted control-action audit entries', async () => {
+    const token = 'ops-admin-token'
+    const scopedRepoPath = await createTempDir('coreline-orch-api-audit-repo-')
+    const { app, stateStore, repoPath, sessionManager } =
+      await createApiHarness({
+        apiExposure: 'untrusted_network',
+        apiAuthToken: undefined,
+        apiAuthTokens: [
+          {
+            tokenId: 'ops-admin',
+            token,
+            subject: 'ops-admin',
+            actorType: 'operator',
+            scopes: [
+              'jobs:read',
+              'jobs:write',
+              'workers:read',
+              'sessions:read',
+              'sessions:write',
+              'audit:read',
+            ],
+            repoPaths: [scopedRepoPath],
+          },
+        ],
+      }, {
+        repoPath: scopedRepoPath,
+      })
+
+    await seedJob(stateStore, repoPath, {
+      jobId: 'job_audit_cancel',
+      status: JobStatus.Queued,
+    })
+    await seedJob(stateStore, repoPath, {
+      jobId: 'job_audit_session',
+      executionMode: 'session',
+      isolationMode: 'same-dir',
+    })
+    await seedWorker(stateStore, repoPath, {
+      workerId: 'wrk_audit_session',
+      jobId: 'job_audit_session',
+      runtimeMode: 'session',
+      status: WorkerStatus.Active,
+    })
+    const session = await sessionManager.createSession({
+      workerId: 'wrk_audit_session',
+      mode: 'session',
+    })
+
+    await app.request('/api/v1/jobs/job_audit_cancel/cancel', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${token}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        reason: 'audit-check',
+      }),
+    })
+    await app.request(`/api/v1/sessions/${session.sessionId}/attach`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${token}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        client_id: 'audit-client',
+      }),
+    })
+    await app.request(`/api/v1/sessions/${session.sessionId}/cancel`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${token}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        reason: 'audit-session-cancel',
+      }),
+    })
+
+    const auditResponse = await app.request('/api/v1/audit?limit=20', {
+      headers: {
+        authorization: `Bearer ${token}`,
+      },
+    })
+    expect(auditResponse.status).toBe(200)
+    const auditBody = (await auditResponse.json()) as {
+      items: Array<{
+        action: string
+        actor_id: string
+        resource_kind: string
+      }>
+    }
+    expect(auditBody.items.map((item) => item.action)).toEqual([
+      'job.cancel',
+      'session.attach',
+      'session.cancel',
+    ])
+    expect(auditBody.items.every((item) => item.actor_id === 'ops-admin')).toBe(
+      true,
+    )
+    expect(auditBody.items.map((item) => item.resource_kind)).toEqual([
+      'job',
+      'session',
+      'session',
+    ])
+  })
+
+  test('session routes reject process-mode workers', async () => {
+    const { app, repoPath, stateStore } = await createApiHarness()
+    await seedJob(stateStore, repoPath, {
+      jobId: 'job_process_session_api',
+      executionMode: 'process',
+      isolationMode: 'same-dir',
+    })
+    await seedWorker(stateStore, repoPath, {
+      workerId: 'wrk_process_session_api',
+      jobId: 'job_process_session_api',
+      runtimeMode: 'process',
+      status: WorkerStatus.Active,
+    })
+
+    const response = await app.request('/api/v1/sessions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        worker_id: 'wrk_process_session_api',
+        mode: 'session',
+      }),
+    })
+
+    expect(response.status).toBe(400)
+    expect((await response.json()) as {
+      error: {
+        code: string
+        message: string
+        details: Record<string, string>
+      }
+    }).toEqual({
+      error: {
+        code: 'INVALID_REQUEST',
+        message: 'Process-mode workers do not support session lifecycle APIs.',
+        details: {
+          worker_id: 'wrk_process_session_api',
+          runtime_mode: 'process',
+        },
+      },
+    })
+  })
+
   test('job event SSE streams persisted history and live events', async () => {
-    const { app, eventBus, stateStore } = await createApiHarness()
+    const { app, eventBus, stateStore, repoPath } = await createApiHarness()
+    await seedJob(stateStore, repoPath, {
+      jobId: 'job_stream_api',
+      status: JobStatus.Queued,
+    })
     const historyEvent = createEvent(
       'job.created',
       { status: 'queued' },
@@ -997,9 +1490,13 @@ describe('api server', () => {
   })
 
   test('external exposure allows SSE with query access token and rejects unauthenticated stream requests', async () => {
-    const { app, eventBus, stateStore } = await createApiHarness({
+    const { app, eventBus, stateStore, repoPath } = await createApiHarness({
       apiExposure: 'untrusted_network',
       apiAuthToken: 'secret-token',
+    })
+    await seedJob(stateStore, repoPath, {
+      jobId: 'job_stream_secure_api',
+      status: JobStatus.Queued,
     })
     const historyEvent = createEvent(
       'job.created',
@@ -1043,6 +1540,627 @@ describe('api server', () => {
     expect(text).toContain('event: job.created')
     expect(text).toContain('event: job.updated')
     await reader.cancel()
+  })
+
+  test('job websocket streams history and live events after subscribe', async () => {
+    const { eventBus, stateStore, repoPath, wsBaseUrl } = await createLiveServerHarness()
+    await seedJob(stateStore, repoPath, {
+      jobId: 'job_ws_api',
+      status: JobStatus.Queued,
+    })
+    const historyEvent = createEvent(
+      'job.created',
+      { status: 'queued' },
+      { jobId: 'job_ws_api' },
+    )
+    await stateStore.appendEvent(historyEvent)
+
+    const socket = await openWebSocket(`${wsBaseUrl}/api/v1/jobs/job_ws_api/ws`)
+    const collector = createWebSocketCollector(socket)
+
+    expect(await collector.next((message: any) => message.type === 'hello')).toMatchObject({
+      type: 'hello',
+      scope: {
+        kind: 'job',
+        id: 'job_ws_api',
+      },
+    })
+
+    socket.send(JSON.stringify({
+      type: 'subscribe',
+      cursor: 0,
+      history_limit: 10,
+    }))
+
+    expect(
+      await collector.next((message: any) => message.type === 'subscribed'),
+    ).toMatchObject({
+      type: 'subscribed',
+      scope: {
+        kind: 'job',
+        id: 'job_ws_api',
+      },
+      history_count: 1,
+    })
+
+    expect(
+      await collector.next((message: any) =>
+        message.type === 'event' &&
+        message.event?.event_type === 'job.created'),
+    ).toMatchObject({
+      type: 'event',
+      event: {
+        event_type: 'job.created',
+        job_id: 'job_ws_api',
+      },
+    })
+
+    eventBus.emit(
+      createEvent(
+        'job.updated',
+        { status: 'running' },
+        { jobId: 'job_ws_api' },
+      ),
+    )
+
+    expect(
+      await collector.next((message: any) =>
+        message.type === 'event' &&
+        message.event?.event_type === 'job.updated'),
+    ).toMatchObject({
+      type: 'event',
+      event: {
+        event_type: 'job.updated',
+        job_id: 'job_ws_api',
+      },
+    })
+
+    socket.close()
+  })
+
+  test('session websocket supports interactive input/output, resume, detach, and cancel messages', async () => {
+    let nextSequence = 1
+    const outputHistory: Array<{
+      sessionId: string
+      sequence: number
+      timestamp: string
+      stream: 'session'
+      data: string
+    }> = []
+    let activeOutputHandler:
+      | ((chunk: {
+          sessionId: string
+          sequence: number
+          timestamp: string
+          stream: 'session'
+          data: string
+        }) => void | Promise<void>)
+      | null = null
+
+    const runtimeBridge: SessionRuntimeBridge = {
+      async attach(session) {
+        return {
+          runtimeIdentity: {
+            mode: session.mode,
+            transport: 'file_ndjson',
+            runtimeSessionId: `runtime_${session.sessionId}`,
+            runtimeInstanceId: 'instance_api',
+            reattachToken: 'reattach_api',
+          },
+          transcriptCursor: {
+            outputSequence: 0,
+          },
+          backpressure: {
+            pendingInputCount: 0,
+          },
+          updatedAt: '2026-04-11T00:00:00.000Z',
+        }
+      },
+      async detach() {
+        return {
+          updatedAt: '2026-04-11T00:00:10.000Z',
+        }
+      },
+      async sendInput(session, _worker, input) {
+        const chunk = {
+          sessionId: session.sessionId,
+          sequence: nextSequence += 1,
+          timestamp: new Date().toISOString(),
+          stream: 'session' as const,
+          data: `echo:${input.data}`,
+        }
+        outputHistory.push(chunk)
+        await activeOutputHandler?.(chunk)
+        return {
+          transcriptCursor: {
+            outputSequence: chunk.sequence,
+            acknowledgedSequence:
+              session.transcriptCursor?.acknowledgedSequence,
+            lastEventId: `session-output-${chunk.sequence}`,
+          },
+          backpressure: {
+            pendingInputCount: 0,
+            lastDrainAt: chunk.timestamp,
+          },
+          updatedAt: chunk.timestamp,
+        }
+      },
+      async readOutput(session, _worker, request) {
+        activeOutputHandler = request.onOutput
+        if (outputHistory.length === 0) {
+          outputHistory.push({
+            sessionId: session.sessionId,
+            sequence: nextSequence,
+            timestamp: new Date().toISOString(),
+            stream: 'session',
+            data: 'worker-ready',
+          })
+        }
+
+        for (const chunk of outputHistory.filter(
+          (entry) =>
+            entry.sessionId === session.sessionId &&
+            entry.sequence > (request.afterSequence ?? 0),
+        )) {
+          await request.onOutput(chunk)
+        }
+
+        return {
+          close() {
+            if (activeOutputHandler === request.onOutput) {
+              activeOutputHandler = null
+            }
+          },
+        }
+      },
+    }
+
+    const { sessionManager, stateStore, repoPath, wsBaseUrl, workerManager } =
+      await createLiveServerHarness({}, { sessionRuntimeBridge: runtimeBridge })
+    await seedJob(stateStore, repoPath, {
+      jobId: 'job_ws_session',
+      executionMode: 'session',
+      isolationMode: 'same-dir',
+    })
+    await seedWorker(stateStore, repoPath, {
+      workerId: 'wrk_ws_session',
+      jobId: 'job_ws_session',
+      runtimeMode: 'session',
+      status: WorkerStatus.Active,
+    })
+    const session = await sessionManager.createSession({
+      workerId: 'wrk_ws_session',
+      mode: 'session',
+    })
+
+    const socket = await openWebSocket(
+      `${wsBaseUrl}/api/v1/sessions/${session.sessionId}/ws`,
+    )
+    const collector = createWebSocketCollector(socket)
+
+    await collector.next((message: any) => message.type === 'hello')
+
+    socket.send(JSON.stringify({
+      type: 'subscribe',
+      client_id: 'cli_ws',
+      mode: 'interactive',
+    }))
+
+    expect(
+      await collector.next((message: any) =>
+        message.type === 'session_control' && message.action === 'attach'),
+    ).toMatchObject({
+      type: 'session_control',
+      action: 'attach',
+      session: {
+        session_id: session.sessionId,
+        status: SessionStatus.Active,
+      },
+    })
+    expect(
+      await collector.next((message: any) => message.type === 'subscribed'),
+    ).toMatchObject({
+      type: 'subscribed',
+      scope: {
+        kind: 'session',
+        id: session.sessionId,
+      },
+      history_count: 0,
+      resume_after_sequence: 0,
+    })
+    expect(
+      await collector.next((message: any) => message.type === 'output'),
+    ).toMatchObject({
+      type: 'output',
+      session_id: session.sessionId,
+      chunk: {
+        data: 'worker-ready',
+      },
+    })
+
+    socket.send(JSON.stringify({
+      type: 'input',
+      data: 'hello-session',
+      sequence: 7,
+    }))
+
+    expect(
+      await collector.next((message: any) => message.type === 'backpressure'),
+    ).toMatchObject({
+      type: 'backpressure',
+      session_id: session.sessionId,
+      session: {
+        session_id: session.sessionId,
+      },
+    })
+
+    const outputMessage = await collector.next((message: any) =>
+      message.type === 'output' &&
+      message.chunk?.data === 'echo:hello-session')
+    expect(outputMessage).toMatchObject({
+      type: 'output',
+      session_id: session.sessionId,
+      chunk: {
+        data: 'echo:hello-session',
+      },
+    })
+
+    socket.send(JSON.stringify({
+      type: 'ack',
+      acknowledged_sequence: outputMessage.chunk.sequence,
+    }))
+
+    expect(
+      await collector.next((message: any) => message.type === 'ack'),
+    ).toMatchObject({
+      type: 'ack',
+      session_id: session.sessionId,
+      session: {
+        session_id: session.sessionId,
+        transcript_cursor: {
+          acknowledged_sequence: outputMessage.chunk.sequence,
+        },
+      },
+    })
+
+    socket.send(JSON.stringify({
+      type: 'resume',
+      after_sequence: outputMessage.chunk.sequence,
+    }))
+
+    expect(
+      await collector.next((message: any) => message.type === 'resume'),
+    ).toMatchObject({
+      type: 'resume',
+      session_id: session.sessionId,
+      after_sequence: outputMessage.chunk.sequence,
+    })
+
+    socket.send(JSON.stringify({
+      type: 'detach',
+      reason: 'browser tab closed',
+    }))
+
+    expect(
+      await collector.next((message: any) =>
+        message.type === 'session_control' && message.action === 'detach'),
+    ).toMatchObject({
+      type: 'session_control',
+      action: 'detach',
+      session: {
+        session_id: session.sessionId,
+      },
+    })
+
+    socket.send(JSON.stringify({
+      type: 'cancel',
+      reason: 'operator cancel',
+    }))
+
+    expect(
+      await collector.next((message: any) =>
+        message.type === 'session_control' && message.action === 'cancel'),
+    ).toMatchObject({
+      type: 'session_control',
+      action: 'cancel',
+      session: {
+        session_id: session.sessionId,
+        status: SessionStatus.Closed,
+      },
+    })
+
+    expect(workerManager.stoppedWorkers).toContain('wrk_ws_session')
+    socket.close()
+  })
+
+  test('session websocket replays transcript output on reconnect before resuming live stream', async () => {
+    let nextSequence = 0
+    const outputHistory: Array<{
+      sessionId: string
+      sequence: number
+      timestamp: string
+      stream: 'session'
+      data: string
+    }> = []
+    const activeOutputHandlers = new Set<
+      (chunk: {
+        sessionId: string
+        sequence: number
+        timestamp: string
+        stream: 'session'
+        data: string
+      }) => void | Promise<void>
+    >()
+
+    const runtimeBridge: SessionRuntimeBridge = {
+      async attach(session) {
+        return {
+          runtimeIdentity: {
+            mode: session.mode,
+            transport: 'file_ndjson',
+            runtimeSessionId: `runtime_${session.sessionId}`,
+            runtimeInstanceId: 'instance_replay',
+            reattachToken: 'reattach_replay',
+          },
+          transcriptCursor: session.transcriptCursor ?? {
+            outputSequence: 0,
+          },
+          backpressure: {
+            pendingInputCount: 0,
+            pendingOutputCount: 0,
+          },
+          updatedAt: '2026-04-11T00:00:00.000Z',
+        }
+      },
+      async detach() {
+        return {
+          updatedAt: '2026-04-11T00:00:10.000Z',
+        }
+      },
+      async sendInput(session, _worker, input) {
+        const chunk = {
+          sessionId: session.sessionId,
+          sequence: nextSequence += 1,
+          timestamp: new Date().toISOString(),
+          stream: 'session' as const,
+          data: `echo:${input.data}`,
+        }
+        outputHistory.push(chunk)
+        await Promise.all(
+          [...activeOutputHandlers].map(async (handler) => await handler(chunk)),
+        )
+
+        return {
+          transcriptCursor: {
+            outputSequence: chunk.sequence,
+            acknowledgedSequence:
+              session.transcriptCursor?.acknowledgedSequence,
+            lastEventId: `session-output-${chunk.sequence}`,
+          },
+          backpressure: {
+            pendingInputCount: 0,
+            pendingOutputCount: 0,
+            lastDrainAt: chunk.timestamp,
+          },
+          updatedAt: chunk.timestamp,
+        }
+      },
+      async readOutput(session, _worker, request) {
+        activeOutputHandlers.add(request.onOutput)
+
+        for (const chunk of outputHistory.filter(
+          (entry) =>
+            entry.sessionId === session.sessionId &&
+            entry.sequence > (request.afterSequence ?? 0),
+        )) {
+          await request.onOutput(chunk)
+        }
+
+        return {
+          close() {
+            activeOutputHandlers.delete(request.onOutput)
+          },
+        }
+      },
+    }
+
+    const { sessionManager, stateStore, repoPath, wsBaseUrl, workerManager } =
+      await createLiveServerHarness({}, { sessionRuntimeBridge: runtimeBridge })
+    await seedJob(stateStore, repoPath, {
+      jobId: 'job_ws_session_replay',
+      executionMode: 'session',
+      isolationMode: 'same-dir',
+    })
+    await seedWorker(stateStore, repoPath, {
+      workerId: 'wrk_ws_session_replay',
+      jobId: 'job_ws_session_replay',
+      runtimeMode: 'session',
+      status: WorkerStatus.Active,
+    })
+    const session = await sessionManager.createSession({
+      workerId: 'wrk_ws_session_replay',
+      mode: 'session',
+    })
+
+    const firstSocket = await openWebSocket(
+      `${wsBaseUrl}/api/v1/sessions/${session.sessionId}/ws`,
+    )
+    const firstCollector = createWebSocketCollector(firstSocket)
+
+    await firstCollector.next((message: any) => message.type === 'hello')
+    firstSocket.send(JSON.stringify({
+      type: 'subscribe',
+      client_id: 'cli_first',
+      mode: 'interactive',
+    }))
+    await firstCollector.next((message: any) =>
+      message.type === 'session_control' && message.action === 'attach')
+    await firstCollector.next((message: any) => message.type === 'subscribed')
+
+    firstSocket.send(JSON.stringify({
+      type: 'input',
+      data: 'first-pass',
+      sequence: 1,
+    }))
+    await firstCollector.next((message: any) => message.type === 'backpressure')
+    const firstOutput = await firstCollector.next((message: any) =>
+      message.type === 'output' &&
+      message.chunk?.data === 'echo:first-pass')
+
+    firstSocket.close()
+    await waitForWebSocketClose(firstSocket)
+
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const currentSession = await sessionManager.getSession(session.sessionId)
+      if (
+        currentSession.status === SessionStatus.Detached &&
+        currentSession.attachedClients === 0
+      ) {
+        break
+      }
+      await Bun.sleep(25)
+    }
+
+    const secondSocket = await openWebSocket(
+      `${wsBaseUrl}/api/v1/sessions/${session.sessionId}/ws`,
+    )
+    const secondCollector = createWebSocketCollector(secondSocket)
+
+    await secondCollector.next((message: any) => message.type === 'hello')
+    secondSocket.send(JSON.stringify({
+      type: 'subscribe',
+      client_id: 'cli_second',
+      mode: 'interactive',
+    }))
+
+    await secondCollector.next((message: any) =>
+      message.type === 'session_control' && message.action === 'attach')
+    expect(
+      await secondCollector.next((message: any) => message.type === 'subscribed'),
+    ).toMatchObject({
+      type: 'subscribed',
+      resume_after_sequence: firstOutput.chunk.sequence,
+    })
+    expect(
+      await secondCollector.next((message: any) =>
+        message.type === 'output' &&
+        message.replayed === true &&
+        message.chunk?.data === 'echo:first-pass'),
+    ).toMatchObject({
+      type: 'output',
+      replayed: true,
+      chunk: {
+        sequence: firstOutput.chunk.sequence,
+        data: 'echo:first-pass',
+      },
+    })
+
+    secondSocket.send(JSON.stringify({
+      type: 'resume',
+      after_sequence: firstOutput.chunk.sequence,
+    }))
+    expect(
+      await secondCollector.next((message: any) => message.type === 'resume'),
+    ).toMatchObject({
+      type: 'resume',
+      after_sequence: firstOutput.chunk.sequence,
+    })
+
+    secondSocket.send(JSON.stringify({
+      type: 'input',
+      data: 'second-pass',
+      sequence: 2,
+    }))
+    await secondCollector.next((message: any) => message.type === 'backpressure')
+    expect(
+      await secondCollector.next((message: any) =>
+        message.type === 'output' &&
+        message.chunk?.data === 'echo:second-pass'),
+    ).toMatchObject({
+      type: 'output',
+      chunk: {
+        data: 'echo:second-pass',
+      },
+    })
+
+    secondSocket.send(JSON.stringify({
+      type: 'cancel',
+      reason: 'replay-finished',
+    }))
+    await secondCollector.next((message: any) =>
+      message.type === 'session_control' && message.action === 'cancel')
+
+    expect(workerManager.stoppedWorkers).toContain('wrk_ws_session_replay')
+    secondSocket.close()
+    await waitForWebSocketClose(secondSocket)
+  })
+
+  test('external exposure websocket requires authentication and accepts query token access', async () => {
+    const { eventBus, stateStore, repoPath, wsBaseUrl, httpBaseUrl } =
+      await createLiveServerHarness({
+        apiExposure: 'untrusted_network',
+        apiAuthToken: 'secret-token',
+      })
+    await seedJob(stateStore, repoPath, {
+      jobId: 'job_ws_secure_api',
+      status: JobStatus.Queued,
+    })
+    await stateStore.appendEvent(
+      createEvent(
+        'job.created',
+        { status: 'queued' },
+        { jobId: 'job_ws_secure_api' },
+      ),
+    )
+
+    const unauthorizedResponse = await fetch(
+      `${httpBaseUrl}/api/v1/jobs/job_ws_secure_api/ws`,
+    )
+    expect(unauthorizedResponse.status).toBe(401)
+
+    const socket = await openWebSocket(
+      `${wsBaseUrl}/api/v1/jobs/job_ws_secure_api/ws?access_token=secret-token`,
+    )
+    const collector = createWebSocketCollector(socket)
+
+    await collector.next((message: any) => message.type === 'hello')
+    socket.send(JSON.stringify({
+      type: 'subscribe',
+      cursor: 0,
+      history_limit: 10,
+    }))
+    await collector.next((message: any) => message.type === 'subscribed')
+
+    expect(
+      await collector.next((message: any) =>
+        message.type === 'event' &&
+        message.event?.event_type === 'job.created'),
+    ).toMatchObject({
+      type: 'event',
+      event: {
+        event_type: 'job.created',
+      },
+    })
+
+    eventBus.emit(
+      createEvent(
+        'job.updated',
+        { status: 'running' },
+        { jobId: 'job_ws_secure_api' },
+      ),
+    )
+    expect(
+      await collector.next((message: any) =>
+        message.type === 'event' &&
+        message.event?.event_type === 'job.updated'),
+    ).toMatchObject({
+      type: 'event',
+      event: {
+        event_type: 'job.updated',
+      },
+    })
+
+    socket.close()
   })
 })
 
@@ -1092,4 +2210,102 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T
       },
     )
   })
+}
+
+async function openWebSocket(url: string): Promise<WebSocket> {
+  return await new Promise<WebSocket>((resolve, reject) => {
+    const socket = new WebSocket(url)
+
+    const cleanup = () => {
+      socket.removeEventListener('open', handleOpen)
+      socket.removeEventListener('error', handleError)
+    }
+
+    const handleOpen = () => {
+      cleanup()
+      resolve(socket)
+    }
+
+    const handleError = () => {
+      cleanup()
+      reject(new Error(`Failed to open WebSocket: ${url}`))
+    }
+
+    socket.addEventListener('open', handleOpen, { once: true })
+    socket.addEventListener('error', handleError, { once: true })
+  })
+}
+
+async function waitForWebSocketClose(socket: WebSocket): Promise<void> {
+  if (socket.readyState === WebSocket.CLOSED) {
+    return
+  }
+
+  await new Promise<void>((resolve) => {
+    socket.addEventListener('close', () => resolve(), { once: true })
+  })
+}
+
+function createWebSocketCollector(socket: WebSocket) {
+  const bufferedMessages: unknown[] = []
+  const waiters: Array<{
+    predicate: (value: any) => boolean
+    resolve: (value: any) => void
+    reject: (error: Error) => void
+    timer: ReturnType<typeof setTimeout>
+  }> = []
+
+  socket.addEventListener('message', (event) => {
+    const payload = JSON.parse(String(event.data)) as unknown
+    const waiterIndex = waiters.findIndex(({ predicate }) => predicate(payload))
+
+    if (waiterIndex >= 0) {
+      const [waiter] = waiters.splice(waiterIndex, 1)
+      if (waiter !== undefined) {
+        clearTimeout(waiter.timer)
+        waiter.resolve(payload)
+      }
+      return
+    }
+
+    bufferedMessages.push(payload)
+  })
+
+  socket.addEventListener('close', () => {
+    for (const waiter of waiters.splice(0)) {
+      clearTimeout(waiter.timer)
+      waiter.reject(new Error('WebSocket closed before expected message arrived.'))
+    }
+  })
+
+  return {
+    async next<T = any>(
+      predicate: (value: T) => boolean,
+      timeoutMs = 1000,
+    ): Promise<T> {
+      const bufferedIndex = bufferedMessages.findIndex((value) =>
+        predicate(value as T),
+      )
+      if (bufferedIndex >= 0) {
+        return bufferedMessages.splice(bufferedIndex, 1)[0] as T
+      }
+
+      return await new Promise<T>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          const waiterIndex = waiters.findIndex((entry) => entry.resolve === resolve)
+          if (waiterIndex >= 0) {
+            waiters.splice(waiterIndex, 1)
+          }
+          reject(new Error('Timed out waiting for WebSocket message.'))
+        }, timeoutMs)
+
+        waiters.push({
+          predicate,
+          resolve: resolve as (value: any) => void,
+          reject,
+          timer,
+        })
+      })
+    },
+  }
 }

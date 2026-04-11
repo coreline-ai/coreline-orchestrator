@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
 import type { OrchestratorConfig } from '../config/config.js'
+import { InMemoryControlPlaneCoordinator } from '../control/coordination.js'
 import { EventBus } from '../core/eventBus.js'
 import { generateWorkerId } from '../core/ids.js'
 import {
@@ -40,7 +41,14 @@ function createConfig(allowedRepoRoots: string[]): OrchestratorConfig {
     apiPort: 3100,
     apiExposure: 'trusted_local',
     apiAuthToken: undefined,
-    maxActiveWorkers: 2,
+  controlPlaneBackend: 'memory',
+  dispatchQueueBackend: 'memory',
+  eventStreamBackend: 'memory',
+  artifactTransportMode: 'shared_filesystem',
+stateStoreBackend: 'file',
+    stateStoreImportFromFile: false,
+    stateStoreSqlitePath: undefined,
+        maxActiveWorkers: 2,
     maxWriteWorkersPerRepo: 1,
     allowedRepoRoots,
     orchestratorRootDir: '.orchestrator',
@@ -135,6 +143,8 @@ class FakeWorkerManager implements SchedulerWorkerManager {
 
 async function createSchedulerHarness(options?: {
   retryPolicy?: RetryPolicy
+  controlPlaneCoordinator?: InMemoryControlPlaneCoordinator
+  executorId?: string
 }) {
   const repoPath = await createTempDir('coreline-orch-scheduler-repo-')
   const config = createConfig([repoPath])
@@ -143,12 +153,22 @@ async function createSchedulerHarness(options?: {
   const queue = new JobQueue()
   const eventBus = new EventBus()
   const workerManager = new FakeWorkerManager(stateStore, config)
+  const controlPlaneCoordinator = options?.controlPlaneCoordinator
   const scheduler = new Scheduler({
     stateStore,
     workerManager,
     queue,
     eventBus,
     config,
+    ...(controlPlaneCoordinator === undefined
+      ? {}
+      : {
+          controlPlane: {
+            coordinator: controlPlaneCoordinator,
+            executorId: options?.executorId ?? 'exec_local',
+            leaseTtlMs: 50,
+          },
+        }),
     dispatchIntervalMs: 25,
     policies: {
       capacity: new CapacityPolicy(),
@@ -164,8 +184,27 @@ async function createSchedulerHarness(options?: {
     queue,
     eventBus,
     workerManager,
+    controlPlaneCoordinator,
     scheduler,
   }
+}
+
+async function waitFor<T>(
+  fn: () => T | Promise<T>,
+  predicate: (value: T) => boolean,
+  timeoutMs = 250,
+): Promise<T> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const value = await fn()
+    if (predicate(value)) {
+      return value
+    }
+
+    await Bun.sleep(10)
+  }
+
+  return await fn()
 }
 
 describe('scheduler', () => {
@@ -338,11 +377,12 @@ describe('scheduler', () => {
     await scheduler.dispatchLoop()
 
     expect((await stateStore.getJob(job.jobId))?.status).toBe(JobStatus.Failed)
-    expect(queue.size()).toBe(0)
-
-    await new Promise((resolve) => setTimeout(resolve, 5))
-
-    expect(queue.size()).toBe(1)
+    const retryQueued = await waitFor(
+      () => queue.size(),
+      (size) => size === 1,
+      250,
+    )
+    expect(retryQueued).toBe(1)
 
     const jobs = await stateStore.listJobs()
     expect(jobs).toHaveLength(2)
@@ -370,6 +410,37 @@ describe('scheduler', () => {
     expect(canceledJob.metadata?.cancelReason).toBe('operator_cancel')
     expect((await stateStore.getJob(job.jobId))?.status).toBe(JobStatus.Canceled)
     expect(queue.size()).toBe(0)
+  })
+
+  test('dispatchLoop skips dispatch when another executor currently holds the scheduler lease', async () => {
+    const controlPlaneCoordinator = new InMemoryControlPlaneCoordinator()
+    await controlPlaneCoordinator.registerExecutor({
+      executorId: 'exec_foreign',
+      hostId: 'host-b',
+      now: '2026-04-11T00:00:00.000Z',
+    })
+    await controlPlaneCoordinator.acquireLease({
+      leaseKey: 'scheduler:dispatch',
+      ownerId: 'exec_foreign',
+      ttlMs: 5_000,
+      now: new Date().toISOString(),
+    })
+
+    const { repoPath, queue, scheduler, workerManager } = await createSchedulerHarness({
+      controlPlaneCoordinator,
+      executorId: 'exec_local',
+    })
+
+    await scheduler.submitJob({
+      title: 'Blocked by remote lease',
+      repo: { path: repoPath },
+      prompt: { user: 'Do not dispatch yet' },
+    })
+
+    await scheduler.dispatchLoop()
+
+    expect(workerManager.startedWorkers).toHaveLength(0)
+    expect(queue.size()).toBe(1)
   })
 
   test('cancelJob rejects terminal jobs', async () => {

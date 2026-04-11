@@ -1,5 +1,14 @@
 import type { JobPriority, JobRecord } from '../core/models.js'
 
+export interface DispatchQueue {
+  enqueue(job: JobRecord): void
+  dequeue(): JobRecord | null
+  peek(): JobRecord | null
+  remove(jobId: string): boolean
+  size(): number
+  list(): JobRecord[]
+}
+
 interface QueueEntry {
   job: JobRecord
   sequence: number
@@ -11,7 +20,7 @@ const priorityWeight: Record<JobPriority, number> = {
   high: 2,
 }
 
-export class JobQueue {
+export class JobQueue implements DispatchQueue {
   readonly #entries: QueueEntry[] = []
   #sequence = 0
 

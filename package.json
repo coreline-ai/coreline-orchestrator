@@ -23,7 +23,15 @@
     "start": "bun dist/index.js",
     "test": "bun test",
     "verify": "bun run check:release-hygiene && bun test && bun run typecheck && bun run build",
-    "release:check": "bun run check:release-hygiene && bun run install:locked && bun test && bun run typecheck && bun run build"
+    "release:check": "bun run check:release-hygiene && bun run install:locked && bun test && bun run typecheck && bun run build",
+    "ops:smoke:v2:session:fixture": "bun ./scripts/run-ops-smoke.ts success --worker-binary ./scripts/fixtures/smoke-session-worker.sh --mode fixture --execution-mode session --verify-session-flow --backend sqlite --api-exposure untrusted_network --api-token ops-smoke-token",
+    "ops:smoke:session:reattach:fixture": "bun ./scripts/run-ops-smoke.ts success --worker-binary ./scripts/fixtures/smoke-session-worker.sh --mode fixture --execution-mode session --verify-session-flow --verify-session-reattach --backend sqlite --api-exposure untrusted_network --api-token ops-smoke-token",
+    "ops:migrate:dry-run": "bun ./scripts/run-v2-migration-dry-run.ts",
+    "ops:smoke:multihost:prototype": "bun ./scripts/run-ops-multihost.ts --worker-binary ./scripts/fixtures/smoke-success-worker.sh",
+    "ops:verify:v2": "bun run ops:smoke:fixture && bun run ops:smoke:timeout:fixture && bun run ops:smoke:v2:session:fixture && bun run ops:migrate:dry-run",
+    "ops:verify:distributed": "bun run ops:smoke:multihost:prototype",
+    "release:v2:check": "bun run verify && bun run ops:verify:v2",
+    "release:distributed:check": "bun run release:v2:check && bun run ops:verify:distributed"
   },
   "dependencies": {
     "hono": "4.12.10",

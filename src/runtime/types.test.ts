@@ -10,6 +10,20 @@ describe('runtime mode capabilities', () => {
       attachable: false,
       detachable: false,
       interactive: false,
+      supportsSameSessionReattach: false,
+      reconnectPolicy: 'terminate_and_reconcile',
+      preferredEventTransport: 'sse',
+    })
+  })
+
+  test('keeps background mode long-lived but not same-session reattachable', () => {
+    expect(runtimeModeCapabilities.background).toEqual({
+      mode: 'background',
+      longLived: true,
+      attachable: false,
+      detachable: true,
+      interactive: false,
+      supportsSameSessionReattach: false,
       reconnectPolicy: 'terminate_and_reconcile',
       preferredEventTransport: 'sse',
     })
@@ -22,6 +36,7 @@ describe('runtime mode capabilities', () => {
       attachable: true,
       detachable: true,
       interactive: true,
+      supportsSameSessionReattach: true,
       reconnectPolicy: 'reattach_same_session',
       preferredEventTransport: 'websocket',
     })

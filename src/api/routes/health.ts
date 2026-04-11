@@ -4,6 +4,7 @@ import type { OrchestratorConfig } from '../../config/config.js'
 import { JobStatus, WorkerStatus } from '../../core/models.js'
 import type { Scheduler } from '../../scheduler/scheduler.js'
 import type { StateStore } from '../../storage/types.js'
+import { requireApiScope } from '../auth.js'
 
 interface HealthRouterDependencies {
   stateStore: StateStore
@@ -18,8 +19,9 @@ export function createHealthRouter(
 ): Hono {
   const app = new Hono()
 
-  app.get('/health', (c) =>
-    c.json({
+  app.get('/health', (c) => {
+    requireApiScope(c.req.raw, dependencies.config, 'system:read')
+    return c.json({
       status: 'ok',
       version: dependencies.version,
       time: new Date().toISOString(),
@@ -27,10 +29,11 @@ export function createHealthRouter(
         0,
         Date.now() - new Date(dependencies.startedAt).getTime(),
       ),
-    }),
-  )
+    })
+  })
 
   app.get('/capacity', async (c) => {
+    requireApiScope(c.req.raw, dependencies.config, 'system:read')
     const workers = await dependencies.stateStore.listWorkers()
     const activeWorkers = workers.filter(isCapacityConsumingWorker).length
     const queuedJobs = dependencies.scheduler.getQueue().size()
@@ -47,6 +50,7 @@ export function createHealthRouter(
   })
 
   app.get('/metrics', async (c) => {
+    requireApiScope(c.req.raw, dependencies.config, 'system:read')
     const jobs = await dependencies.stateStore.listJobs()
     const terminalJobs = jobs.filter((job) => isTerminalJob(job.status))
 

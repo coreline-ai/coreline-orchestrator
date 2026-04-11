@@ -5,16 +5,24 @@ import type { OrchestratorEvent } from '../core/events.js'
 import type {
   JobRecord,
   JobResultRecord,
+  SessionRecord,
+  SessionTranscriptEntry,
   WorkerRecord,
   WorkerResultRecord,
 } from '../core/models.js'
+import { SessionNotFoundError } from '../core/errors.js'
+import { resolveManifestedFilePath } from './manifestTransport.js'
 import { ensureDir, safeWriteFile } from './safeWrite.js'
 import type {
   ArtifactReferenceRecord,
   ListEventsFilter,
   ListJobsFilter,
+  ListSessionTranscriptFilter,
+  SessionRuntimeLookup,
+  ListSessionsFilter,
   ListWorkersFilter,
   StateStore,
+  UpdateSessionRuntimeInput,
 } from './types.js'
 
 const storeDirectoryNames = [
@@ -26,6 +34,7 @@ const storeDirectoryNames = [
   'results',
   'artifacts',
   'indexes',
+  'transcripts',
 ] as const
 
 interface PersistedIndexFile<T> {
@@ -52,12 +61,22 @@ interface EventLogCache {
   events: OrchestratorEvent[]
 }
 
+interface SessionTranscriptLogCache {
+  filePath: string
+  mtimeMs: number
+  size: number
+  entries: SessionTranscriptEntry[]
+}
+
 export class FileStateStore implements StateStore {
   readonly rootDir: string
   private jobCache: EntityCache<JobRecord> | null = null
   private workerCache: EntityCache<WorkerRecord> | null = null
+  private sessionCache: EntityCache<SessionRecord> | null = null
   private artifactCache: ArtifactIndexCache | null = null
   private eventLogCache: EventLogCache | null = null
+  private sessionTranscriptCaches = new Map<string, SessionTranscriptLogCache>()
+  private sessionTranscriptWriteChains = new Map<string, Promise<void>>()
 
   constructor(rootDir = '.orchestrator') {
     this.rootDir = resolve(rootDir)
@@ -177,6 +196,165 @@ export class FileStateStore implements StateStore {
       .slice(0, filter.limit ?? Number.POSITIVE_INFINITY)
   }
 
+  async createSession(session: SessionRecord): Promise<void> {
+    await this.writeJsonFile(this.getSessionPath(session.sessionId), session)
+    await this.ensureIndexesReady()
+    this.sessionCache = upsertEntityCache(
+      this.sessionCache,
+      cloneValue(session),
+      (record) => record.sessionId,
+    )
+    await this.persistSessionIndex()
+  }
+
+  async updateSession(session: SessionRecord): Promise<void> {
+    await this.writeJsonFile(this.getSessionPath(session.sessionId), session)
+    await this.ensureIndexesReady()
+    this.sessionCache = upsertEntityCache(
+      this.sessionCache,
+      cloneValue(session),
+      (record) => record.sessionId,
+    )
+    await this.persistSessionIndex()
+  }
+
+  async updateSessionRuntime(
+    sessionId: string,
+    input: UpdateSessionRuntimeInput,
+  ): Promise<SessionRecord> {
+    await this.ensureIndexesReady()
+    const existingSession = this.sessionCache?.byId.get(sessionId) ?? null
+    if (existingSession === null) {
+      throw new SessionNotFoundError(sessionId)
+    }
+
+    const updatedSession: SessionRecord = {
+      ...cloneValue(existingSession),
+      ...(input.runtimeIdentity === undefined
+        ? {}
+        : { runtimeIdentity: cloneValue(input.runtimeIdentity) }),
+      ...(input.transcriptCursor === undefined
+        ? {}
+        : { transcriptCursor: cloneValue(input.transcriptCursor) }),
+      ...(input.backpressure === undefined
+        ? {}
+        : { backpressure: cloneValue(input.backpressure) }),
+      updatedAt: input.updatedAt ?? new Date().toISOString(),
+    }
+
+    await this.updateSession(updatedSession)
+    return cloneValue(updatedSession)
+  }
+
+  async getSession(sessionId: string): Promise<SessionRecord | null> {
+    await this.ensureIndexesReady()
+    const session = this.sessionCache?.byId.get(sessionId) ?? null
+    return session === null ? null : cloneValue(session)
+  }
+
+  async listSessions(filter: ListSessionsFilter = {}): Promise<SessionRecord[]> {
+    await this.ensureIndexesReady()
+    const sessions = this.sessionCache?.items ?? []
+
+    return sessions
+      .filter((session) => {
+        if (filter.workerId !== undefined && session.workerId !== filter.workerId) {
+          return false
+        }
+
+        if (filter.jobId !== undefined && session.jobId !== filter.jobId) {
+          return false
+        }
+
+        if (filter.status !== undefined && session.status !== filter.status) {
+          return false
+        }
+
+        return true
+      })
+      .map((session) => cloneValue(session))
+      .sort(compareUpdatedAtDesc)
+      .slice(0, filter.limit ?? Number.POSITIVE_INFINITY)
+  }
+
+  async findSessionByRuntimeIdentity(
+    lookup: SessionRuntimeLookup,
+  ): Promise<SessionRecord | null> {
+    await this.ensureIndexesReady()
+    if (!hasSessionRuntimeLookupValue(lookup)) {
+      return null
+    }
+
+    const session =
+      this.sessionCache?.items.find((candidate) =>
+        matchesSessionRuntimeLookup(candidate, lookup),
+      ) ?? null
+
+    return session === null ? null : cloneValue(session)
+  }
+
+  async appendSessionTranscriptEntry(
+    entry: Omit<SessionTranscriptEntry, 'sequence'>,
+  ): Promise<SessionTranscriptEntry> {
+    return await this.enqueueSessionTranscriptWrite(entry.sessionId, async () => {
+      const filePath = this.getSessionTranscriptPath(entry.sessionId)
+      await ensureDir(join(this.rootDir, 'transcripts'))
+      const existingEntries = await this.getCachedSessionTranscript(entry.sessionId)
+      const nextEntry: SessionTranscriptEntry = {
+        ...cloneValue(entry),
+        sequence: (existingEntries.at(-1)?.sequence ?? 0) + 1,
+      }
+
+      await appendFile(filePath, `${JSON.stringify(nextEntry)}\n`, 'utf8')
+      const fileStats = await stat(filePath).catch(() => null)
+      if (fileStats !== null) {
+        this.sessionTranscriptCaches.set(entry.sessionId, {
+          filePath,
+          mtimeMs: fileStats.mtimeMs,
+          size: fileStats.size,
+          entries: [...existingEntries, cloneValue(nextEntry)],
+        })
+      }
+
+      return cloneValue(nextEntry)
+    })
+  }
+
+  async listSessionTranscript(
+    filter: ListSessionTranscriptFilter,
+  ): Promise<SessionTranscriptEntry[]> {
+    const entries = await this.getCachedSessionTranscript(filter.sessionId)
+    const filtered = entries.filter((entry) => {
+      if (
+        filter.afterSequence !== undefined &&
+        entry.sequence <= filter.afterSequence
+      ) {
+        return false
+      }
+
+      if (
+        filter.afterOutputSequence !== undefined &&
+        (entry.outputSequence ?? 0) <= filter.afterOutputSequence
+      ) {
+        return false
+      }
+
+      if (
+        filter.kinds !== undefined &&
+        filter.kinds.length > 0 &&
+        !filter.kinds.includes(entry.kind)
+      ) {
+        return false
+      }
+
+      return true
+    })
+
+    return filtered
+      .slice(0, filter.limit ?? Number.POSITIVE_INFINITY)
+      .map((entry) => cloneValue(entry))
+  }
+
   async appendEvent(event: OrchestratorEvent): Promise<void> {
     const eventLogPath = this.getEventLogPath()
     await ensureDir(join(this.rootDir, 'events'))
@@ -220,6 +398,10 @@ export class FileStateStore implements StateStore {
     }
 
     return artifact === null ? null : cloneValue(artifact)
+  }
+
+  close(): void {
+    // noop
   }
 
   private async writeJsonFile(filePath: string, value: object): Promise<void> {
@@ -288,6 +470,7 @@ export class FileStateStore implements StateStore {
     if (
       this.jobCache !== null &&
       this.workerCache !== null &&
+      this.sessionCache !== null &&
       this.artifactCache !== null
     ) {
       return
@@ -302,14 +485,19 @@ export class FileStateStore implements StateStore {
     const workers = await this.readJsonDirectory<WorkerRecord>(
       join(this.rootDir, 'workers'),
     )
+    const sessions = await this.readJsonDirectory<SessionRecord>(
+      join(this.rootDir, 'sessions'),
+    )
 
     this.jobCache = buildEntityCache(jobs, (job) => job.jobId)
     this.workerCache = buildEntityCache(workers, (worker) => worker.workerId)
+    this.sessionCache = buildEntityCache(sessions, (session) => session.sessionId)
     await this.rebuildArtifactIndex()
 
     await Promise.all([
       this.persistJobIndex(),
       this.persistWorkerIndex(),
+      this.persistSessionIndex(),
     ])
   }
 
@@ -327,6 +515,14 @@ export class FileStateStore implements StateStore {
     }
 
     await this.writeIndexFile(this.getWorkerIndexPath(), this.workerCache.items)
+  }
+
+  private async persistSessionIndex(): Promise<void> {
+    if (this.sessionCache === null) {
+      return
+    }
+
+    await this.writeIndexFile(this.getSessionIndexPath(), this.sessionCache.items)
   }
 
   private async persistArtifactIndex(): Promise<void> {
@@ -446,7 +642,9 @@ export class FileStateStore implements StateStore {
       return null
     }
 
-    const rawValue = await this.readTextFile(filePath)
+    const rawValue = await this.readTextFile(
+      (await resolveManifestedFilePath(filePath)) ?? filePath,
+    )
     if (rawValue === null) {
       return null
     }
@@ -507,12 +705,68 @@ export class FileStateStore implements StateStore {
     return events
   }
 
+  private async getCachedSessionTranscript(
+    sessionId: string,
+  ): Promise<SessionTranscriptEntry[]> {
+    const filePath = this.getSessionTranscriptPath(sessionId)
+    const fileStats = await stat(filePath).catch((error) => {
+      if (isMissingFileError(error)) {
+        return null
+      }
+
+      throw error
+    })
+
+    if (fileStats === null) {
+      this.sessionTranscriptCaches.set(sessionId, {
+        filePath,
+        mtimeMs: 0,
+        size: 0,
+        entries: [],
+      })
+      return []
+    }
+
+    const cached = this.sessionTranscriptCaches.get(sessionId) ?? null
+    if (
+      cached !== null &&
+      cached.filePath === filePath &&
+      cached.mtimeMs === fileStats.mtimeMs &&
+      cached.size === fileStats.size
+    ) {
+      return cached.entries
+    }
+
+    const rawLog = await this.readTextFile(filePath)
+    const entries =
+      rawLog === null || rawLog.trim() === ''
+        ? []
+        : rawLog
+            .split('\n')
+            .map((line) => line.trim())
+            .filter((line) => line.length > 0)
+            .map((line) => JSON.parse(line) as SessionTranscriptEntry)
+
+    this.sessionTranscriptCaches.set(sessionId, {
+      filePath,
+      mtimeMs: fileStats.mtimeMs,
+      size: fileStats.size,
+      entries,
+    })
+
+    return entries
+  }
+
   private getJobPath(jobId: string): string {
     return join(this.rootDir, 'jobs', `${jobId}.json`)
   }
 
   private getWorkerPath(workerId: string): string {
     return join(this.rootDir, 'workers', `${workerId}.json`)
+  }
+
+  private getSessionPath(sessionId: string): string {
+    return join(this.rootDir, 'sessions', `${sessionId}.json`)
   }
 
   private getEventLogPath(): string {
@@ -527,8 +781,37 @@ export class FileStateStore implements StateStore {
     return join(this.rootDir, 'indexes', 'workers.json')
   }
 
+  private getSessionIndexPath(): string {
+    return join(this.rootDir, 'indexes', 'sessions.json')
+  }
+
   private getArtifactIndexPath(): string {
     return join(this.rootDir, 'indexes', 'artifacts.json')
+  }
+
+  private getSessionTranscriptPath(sessionId: string): string {
+    return join(this.rootDir, 'transcripts', `${sessionId}.ndjson`)
+  }
+
+  private async enqueueSessionTranscriptWrite<T>(
+    sessionId: string,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const previous = this.sessionTranscriptWriteChains.get(sessionId) ?? Promise.resolve()
+    const run = previous.catch(() => undefined).then(operation)
+    const pending = run.then(
+      () => undefined,
+      () => undefined,
+    )
+    this.sessionTranscriptWriteChains.set(sessionId, pending)
+
+    try {
+      return await run
+    } finally {
+      if (this.sessionTranscriptWriteChains.get(sessionId) === pending) {
+        this.sessionTranscriptWriteChains.delete(sessionId)
+      }
+    }
   }
 }
 
@@ -674,6 +957,47 @@ function compareArtifactIdAsc(
 
 function cloneValue<T>(value: T): T {
   return structuredClone(value)
+}
+
+function hasSessionRuntimeLookupValue(lookup: SessionRuntimeLookup): boolean {
+  return (
+    lookup.sessionId !== undefined ||
+    lookup.runtimeSessionId !== undefined ||
+    lookup.runtimeInstanceId !== undefined ||
+    lookup.reattachToken !== undefined
+  )
+}
+
+function matchesSessionRuntimeLookup(
+  session: SessionRecord,
+  lookup: SessionRuntimeLookup,
+): boolean {
+  if (lookup.sessionId !== undefined && session.sessionId !== lookup.sessionId) {
+    return false
+  }
+
+  if (
+    lookup.runtimeSessionId !== undefined &&
+    session.runtimeIdentity?.runtimeSessionId !== lookup.runtimeSessionId
+  ) {
+    return false
+  }
+
+  if (
+    lookup.runtimeInstanceId !== undefined &&
+    session.runtimeIdentity?.runtimeInstanceId !== lookup.runtimeInstanceId
+  ) {
+    return false
+  }
+
+  if (
+    lookup.reattachToken !== undefined &&
+    session.runtimeIdentity?.reattachToken !== lookup.reattachToken
+  ) {
+    return false
+  }
+
+  return true
 }
 
 function matchesEventFilter(

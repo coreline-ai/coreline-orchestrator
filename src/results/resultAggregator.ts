@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises'
 
 import { safeWriteFile } from '../storage/safeWrite.js'
+import { resolveManifestedFilePath } from '../storage/manifestTransport.js'
 import type {
   JobRecord,
   JobResultRecord,
@@ -15,9 +16,10 @@ export class ResultAggregator {
     resultPath: string,
   ): Promise<WorkerResultRecord | null> {
     let rawContents: string
+    const resolvedPath = await resolveManifestedFilePath(resultPath)
 
     try {
-      rawContents = await readFile(resultPath, 'utf8')
+      rawContents = await readFile(resolvedPath ?? resultPath, 'utf8')
     } catch (error) {
       if (error instanceof Error && 'code' in error && error.code === 'ENOENT') {
         return null

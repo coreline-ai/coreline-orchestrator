@@ -4,7 +4,14 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
 import { createEvent } from '../core/events.js'
-import { JobStatus, WorkerStatus, type JobRecord, type WorkerRecord } from '../core/models.js'
+import {
+  JobStatus,
+  SessionStatus,
+  WorkerStatus,
+  type JobRecord,
+  type SessionRecord,
+  type WorkerRecord,
+} from '../core/models.js'
 import { FileStateStore } from './fileStateStore.js'
 
 const tempDirs: string[] = []
@@ -86,6 +93,39 @@ function createWorkerRecord(
   }
 }
 
+function createSessionRecord(
+  overrides: Partial<SessionRecord> = {},
+): SessionRecord {
+  return {
+    sessionId: 'sess_01',
+    workerId: 'wrk_01',
+    jobId: 'job_01',
+    mode: 'session',
+    status: SessionStatus.Active,
+    attachMode: 'interactive',
+    attachedClients: 1,
+    createdAt: '2026-04-10T12:00:00.000Z',
+    updatedAt: '2026-04-10T12:00:00.000Z',
+    runtimeIdentity: {
+      mode: 'session',
+      transport: 'websocket',
+      runtimeSessionId: 'runtime-session-01',
+      runtimeInstanceId: 'runtime-instance-01',
+      reattachToken: 'reattach-01',
+    },
+    transcriptCursor: {
+      outputSequence: 2,
+      acknowledgedSequence: 1,
+    },
+    backpressure: {
+      pendingOutputCount: 1,
+      pendingOutputBytes: 64,
+    },
+    metadata: { source: 'test' },
+    ...overrides,
+  }
+}
+
 describe('FileStateStore', () => {
   test('initializes all required directories', async () => {
     const store = await createStore()
@@ -94,6 +134,7 @@ describe('FileStateStore', () => {
       'workers',
       'sessions',
       'events',
+      'transcripts',
       'logs',
       'results',
       'artifacts',
@@ -148,8 +189,10 @@ describe('FileStateStore', () => {
 
     expect(await store.getJob('missing')).toBeNull()
     expect(await store.getWorker('missing')).toBeNull()
+    expect(await store.getSession('missing')).toBeNull()
     expect(await store.listJobs()).toEqual([])
     expect(await store.listWorkers()).toEqual([])
+    expect(await store.listSessions()).toEqual([])
     expect(await store.listEvents()).toEqual([])
   })
 
@@ -168,6 +211,126 @@ describe('FileStateStore', () => {
     const jobWorkers = await store.listWorkers({ jobId: 'job_01' })
 
     expect(jobWorkers).toEqual([workerA])
+  })
+
+  test('creates sessions and filters listSessions by worker and status', async () => {
+    const store = await createStore()
+    const sessionA = createSessionRecord()
+    const sessionB = createSessionRecord({
+      sessionId: 'sess_02',
+      workerId: 'wrk_02',
+      jobId: 'job_02',
+      status: SessionStatus.Detached,
+      updatedAt: '2026-04-10T12:05:00.000Z',
+    })
+
+    await store.createSession(sessionA)
+    await store.createSession(sessionB)
+
+    expect(await store.getSession(sessionA.sessionId)).toEqual(sessionA)
+    expect(
+      await store.listSessions({
+        workerId: 'wrk_02',
+        status: SessionStatus.Detached,
+      }),
+    ).toEqual([sessionB])
+  })
+
+  test('updates and looks up session runtime metadata', async () => {
+    const store = await createStore()
+    const session = createSessionRecord()
+    await store.createSession(session)
+
+    expect(
+      await store.findSessionByRuntimeIdentity({
+        runtimeSessionId: 'runtime-session-01',
+      }),
+    ).toEqual(session)
+
+    const updated = await store.updateSessionRuntime(session.sessionId, {
+      transcriptCursor: {
+        outputSequence: 5,
+        acknowledgedSequence: 4,
+      },
+      backpressure: {
+        pendingOutputCount: 0,
+        pendingOutputBytes: 0,
+        lastAckAt: '2026-04-10T12:05:00.000Z',
+      },
+      updatedAt: '2026-04-10T12:05:00.000Z',
+    })
+
+    expect(updated.runtimeIdentity?.reattachToken).toBe('reattach-01')
+    expect(updated.transcriptCursor?.outputSequence).toBe(5)
+    expect(
+      (
+        await store.findSessionByRuntimeIdentity({
+          runtimeInstanceId: 'runtime-instance-01',
+        })
+      )?.backpressure?.lastAckAt,
+    ).toBe('2026-04-10T12:05:00.000Z')
+  })
+
+  test('appends and replays session transcript entries from disk', async () => {
+    const store = await createStore()
+    await store.createSession(createSessionRecord())
+
+    const first = await store.appendSessionTranscriptEntry({
+      sessionId: 'sess_01',
+      timestamp: '2026-04-10T12:00:01.000Z',
+      kind: 'attach',
+      attachMode: 'interactive',
+      clientId: 'cli_01',
+    })
+    const second = await store.appendSessionTranscriptEntry({
+      sessionId: 'sess_01',
+      timestamp: '2026-04-10T12:00:02.000Z',
+      kind: 'output',
+      stream: 'session',
+      data: 'worker-ready',
+      outputSequence: 1,
+    })
+
+    expect(await store.listSessionTranscript({ sessionId: 'sess_01' })).toEqual([
+      first,
+      second,
+    ])
+
+    const transcriptPath = join(store.rootDir, 'transcripts', 'sess_01.ndjson')
+    const rawTranscript = await readFile(transcriptPath, 'utf8')
+    expect(rawTranscript.trim().split('\n')).toHaveLength(2)
+  })
+
+  test('serializes concurrent session transcript appends with unique sequences', async () => {
+    const store = await createStore()
+    await store.createSession(createSessionRecord())
+
+    const entries = await Promise.all([
+      store.appendSessionTranscriptEntry({
+        sessionId: 'sess_01',
+        timestamp: '2026-04-10T12:00:01.000Z',
+        kind: 'attach',
+        attachMode: 'interactive',
+        clientId: 'cli_01',
+      }),
+      store.appendSessionTranscriptEntry({
+        sessionId: 'sess_01',
+        timestamp: '2026-04-10T12:00:01.100Z',
+        kind: 'input',
+        data: 'hello',
+      }),
+      store.appendSessionTranscriptEntry({
+        sessionId: 'sess_01',
+        timestamp: '2026-04-10T12:00:01.200Z',
+        kind: 'output',
+        stream: 'session',
+        data: 'world',
+        outputSequence: 1,
+      }),
+    ])
+
+    expect(entries.map((entry) => entry.sequence)).toEqual([1, 2, 3])
+    expect(await store.listSessionTranscript({ sessionId: 'sess_01' })).toEqual(entries)
   })
 
   test('appends and filters events with offset and limit', async () => {
@@ -299,6 +462,12 @@ describe('FileStateStore', () => {
       resultPath: join(repoPath, '.orchestrator', 'results', 'wrk_rebuild.json'),
       updatedAt: '2026-04-10T12:46:00.000Z',
     })
+    const session = createSessionRecord({
+      sessionId: 'sess_rebuild',
+      workerId: worker.workerId,
+      jobId: job.jobId,
+      updatedAt: '2026-04-10T12:47:00.000Z',
+    })
 
     await writeFile(
       job.resultPath!,
@@ -340,9 +509,11 @@ describe('FileStateStore', () => {
 
     await store.createJob(job)
     await store.createWorker(worker)
+    await store.createSession(session)
 
     await writeFile(join(store.rootDir, 'indexes', 'jobs.json'), '{', 'utf8')
     await writeFile(join(store.rootDir, 'indexes', 'workers.json'), '{', 'utf8')
+    await writeFile(join(store.rootDir, 'indexes', 'sessions.json'), '{', 'utf8')
     await writeFile(join(store.rootDir, 'indexes', 'artifacts.json'), '{', 'utf8')
 
     const rebuiltStore = new FileStateStore(join(directoryPath, '.orchestrator'))
@@ -350,6 +521,7 @@ describe('FileStateStore', () => {
 
     expect(await rebuiltStore.getJob(job.jobId)).toEqual(job)
     expect(await rebuiltStore.getWorker(worker.workerId)).toEqual(worker)
+    expect(await rebuiltStore.getSession(session.sessionId)).toEqual(session)
     expect(await rebuiltStore.findArtifactReference('art_rebuild_job')).toEqual({
       artifactId: 'art_rebuild_job',
       kind: 'report',

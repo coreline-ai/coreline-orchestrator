@@ -5,6 +5,7 @@ import { Hono } from 'hono'
 import {
   AuthenticationRequiredError,
   ArtifactAccessDeniedError,
+  AuthorizationScopeDeniedError,
   RepoNotAllowedError,
   TimeoutExceededError,
 } from '../core/errors.js'
@@ -83,6 +84,41 @@ describe('api middleware', () => {
         message: 'Valid API authentication is required.',
         details: {
           reason: 'missing_token',
+        },
+      },
+    })
+  })
+
+  test('maps AUTHORIZATION_SCOPE_DENIED to HTTP 403', async () => {
+    const app = new Hono()
+    applyApiMiddleware(app, {
+      apiExposure: 'untrusted_network',
+      apiAuthToken: 'secret-token',
+      apiAuthTokens: undefined,
+    })
+    app.get('/forbidden', () => {
+      throw new AuthorizationScopeDeniedError('jobs:write', 'ops-reader', {
+        resourceKind: 'job',
+        resourceId: 'job_01',
+      })
+    })
+
+    const response = await app.request('/forbidden', {
+      headers: {
+        authorization: 'Bearer secret-token',
+      },
+    })
+
+    expect(response.status).toBe(403)
+    expect(await response.json()).toEqual({
+      error: {
+        code: 'AUTHORIZATION_SCOPE_DENIED',
+        message: 'Authenticated principal is not authorized for this action.',
+        details: {
+          required_scope: 'jobs:write',
+          principal_id: 'ops-reader',
+          resource_kind: 'job',
+          resource_id: 'job_01',
         },
       },
     })

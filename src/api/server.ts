@@ -1,16 +1,21 @@
 import { Hono } from 'hono'
+import { websocket } from 'hono/bun'
 
 import type { OrchestratorConfig } from '../config/config.js'
-import type { EventBus } from '../core/eventBus.js'
+import type { EventStream } from '../core/eventBus.js'
 import { LogIndex } from '../logs/logIndex.js'
 import type { SchedulerWorkerManager } from '../scheduler/scheduler.js'
 import { Scheduler } from '../scheduler/scheduler.js'
+import type { SessionManager } from '../sessions/sessionManager.js'
 import type { StateStore } from '../storage/types.js'
 import { applyApiMiddleware } from './middleware.js'
+import { createAuditRouter } from './routes/audit.js'
 import { createArtifactsRouter } from './routes/artifacts.js'
 import { createEventsRouter } from './routes/events.js'
 import { createHealthRouter } from './routes/health.js'
 import { createJobsRouter } from './routes/jobs.js'
+import { createRealtimeRouter } from './routes/realtime.js'
+import { createSessionsRouter } from './routes/sessions.js'
 import { createWorkersRouter } from './routes/workers.js'
 
 export interface AppDependencies {
@@ -18,7 +23,8 @@ export interface AppDependencies {
   stateStore: StateStore
   workerManager: SchedulerWorkerManager
   scheduler: Scheduler
-  eventBus: EventBus
+  sessionManager: SessionManager
+  eventBus: EventStream
   logIndex: LogIndex
   startedAt: string
   version?: string
@@ -47,6 +53,7 @@ export function createApp(dependencies: AppDependencies): Hono {
       stateStore: dependencies.stateStore,
       scheduler: dependencies.scheduler,
       config: dependencies.config,
+      eventBus: dependencies.eventBus,
     }),
   )
   api.route(
@@ -56,6 +63,23 @@ export function createApp(dependencies: AppDependencies): Hono {
       workerManager: dependencies.workerManager,
       scheduler: dependencies.scheduler,
       logIndex: dependencies.logIndex,
+      config: dependencies.config,
+      eventBus: dependencies.eventBus,
+    }),
+  )
+  api.route(
+    '/sessions',
+    createSessionsRouter({
+      sessionManager: dependencies.sessionManager,
+      stateStore: dependencies.stateStore,
+      config: dependencies.config,
+      eventBus: dependencies.eventBus,
+    }),
+  )
+  api.route(
+    '/audit',
+    createAuditRouter({
+      stateStore: dependencies.stateStore,
       config: dependencies.config,
     }),
   )
@@ -71,6 +95,16 @@ export function createApp(dependencies: AppDependencies): Hono {
     createEventsRouter({
       stateStore: dependencies.stateStore,
       eventBus: dependencies.eventBus,
+      config: dependencies.config,
+    }),
+  )
+  api.route(
+    '/',
+    createRealtimeRouter({
+      stateStore: dependencies.stateStore,
+      eventBus: dependencies.eventBus,
+      sessionManager: dependencies.sessionManager,
+      config: dependencies.config,
     }),
   )
 
@@ -86,5 +120,6 @@ export function startServer(
     hostname: config.apiHost,
     port: config.apiPort,
     fetch: app.fetch,
+    websocket,
   })
 }

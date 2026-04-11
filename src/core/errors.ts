@@ -22,6 +22,24 @@ export class AuthenticationRequiredError extends OrchestratorError {
   }
 }
 
+export class AuthorizationScopeDeniedError extends OrchestratorError {
+  constructor(
+    requiredScope: string,
+    principalId: string,
+    details: ErrorDetails = {},
+  ) {
+    super(
+      'AUTHORIZATION_SCOPE_DENIED',
+      'Authenticated principal is not authorized for this action.',
+      {
+        requiredScope,
+        principalId,
+        ...details,
+      },
+    )
+  }
+}
+
 export class InvalidConfigurationError extends OrchestratorError {
   constructor(setting: string, reason: string) {
     super('INVALID_CONFIGURATION', reason, {
@@ -31,7 +49,7 @@ export class InvalidConfigurationError extends OrchestratorError {
 }
 
 export class InvalidStateTransitionError extends OrchestratorError {
-  constructor(scope: 'job' | 'worker', from: string, to: string) {
+  constructor(scope: 'job' | 'worker' | 'session', from: string, to: string) {
     super(
       'INVALID_STATE_TRANSITION',
       `Invalid ${scope} state transition: ${from} -> ${to}`,
@@ -55,6 +73,50 @@ export class WorkerNotFoundError extends OrchestratorError {
 export class SessionNotFoundError extends OrchestratorError {
   constructor(sessionId: string) {
     super('SESSION_NOT_FOUND', `Session ${sessionId} was not found.`, { sessionId })
+  }
+}
+
+export class SessionTransportUnavailableError extends OrchestratorError {
+  constructor(
+    sessionId: string,
+    action: 'attach' | 'detach' | 'send_input' | 'read_output' | 'reattach',
+    reason?: string,
+  ) {
+    super(
+      'SESSION_TRANSPORT_UNAVAILABLE',
+      `Session ${sessionId} does not support ${action}.`,
+      {
+        sessionId,
+        action,
+        reason,
+      },
+    )
+  }
+}
+
+export class SessionReattachFailedError extends OrchestratorError {
+  constructor(sessionId: string, reason?: string) {
+    super(
+      'SESSION_REATTACH_FAILED',
+      `Failed to reattach session ${sessionId}.`,
+      {
+        sessionId,
+        reason,
+      },
+    )
+  }
+}
+
+export class SessionInputRejectedError extends OrchestratorError {
+  constructor(sessionId: string, reason?: string) {
+    super(
+      'SESSION_INPUT_REJECTED',
+      `Session ${sessionId} rejected input.`,
+      {
+        sessionId,
+        reason,
+      },
+    )
   }
 }
 

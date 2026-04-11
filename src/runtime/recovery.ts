@@ -1,4 +1,5 @@
 import {
+  type SessionRecord,
   WorkerStatus,
   type WorkerRecord,
 } from '../core/models.js'
@@ -19,10 +20,36 @@ export function getPersistedRuntimeIdentity(
   }
 }
 
+export function getPersistedRuntimeIdentityFromSession(
+  session: Pick<
+    SessionRecord,
+    | 'sessionId'
+    | 'mode'
+    | 'runtimeIdentity'
+    | 'transcriptCursor'
+    | 'backpressure'
+  >,
+): PersistedRuntimeIdentity {
+  return {
+    mode: session.mode,
+    sessionId: session.sessionId,
+    pid: session.runtimeIdentity?.processPid,
+    startedAt: session.runtimeIdentity?.startedAt,
+    runtimeSessionId: session.runtimeIdentity?.runtimeSessionId,
+    runtimeInstanceId: session.runtimeIdentity?.runtimeInstanceId,
+    reattachToken: session.runtimeIdentity?.reattachToken,
+    transport: session.runtimeIdentity?.transport,
+    transportRootPath: session.runtimeIdentity?.transportRootPath,
+    transcriptCursor: session.transcriptCursor,
+    backpressure: session.backpressure,
+  }
+}
+
 export function classifyWorkerRecoveryDisposition(input: {
   worker: Pick<WorkerRecord, 'status'>
   hasRuntimeHandle?: boolean
   isRuntimeLive?: boolean
+  isSessionReattachable?: boolean
 }): RecoveryDisposition {
   if (isTerminalWorkerStatus(input.worker.status)) {
     return 'terminal_noop'
@@ -33,6 +60,10 @@ export function classifyWorkerRecoveryDisposition(input: {
   }
 
   if (input.hasRuntimeHandle === true) {
+    return 'reattach_supported'
+  }
+
+  if (input.isSessionReattachable === true) {
     return 'reattach_supported'
   }
 
@@ -53,6 +84,34 @@ export function isPersistedRuntimeIdentityLive(
     case 'session':
       return false
   }
+}
+
+export function canReattachPersistedRuntimeIdentity(
+  identity: PersistedRuntimeIdentity,
+): boolean {
+  return (
+    identity.mode === 'session' &&
+    identity.sessionId !== undefined &&
+    (hasValue(identity.runtimeSessionId) || hasValue(identity.reattachToken)) &&
+    (identity.transport !== 'file_ndjson' || hasValue(identity.transportRootPath))
+  )
+}
+
+export type PersistedRuntimeObservation =
+  | 'missing'
+  | 'live_process'
+  | 'reattachable_session_identity'
+
+export function observePersistedRuntimeIdentity(
+  identity: PersistedRuntimeIdentity,
+): PersistedRuntimeObservation {
+  if (identity.mode === 'session') {
+    return canReattachPersistedRuntimeIdentity(identity)
+      ? 'reattachable_session_identity'
+      : 'missing'
+  }
+
+  return isPersistedRuntimeIdentityLive(identity) ? 'live_process' : 'missing'
 }
 
 export async function terminatePersistedRuntimeIdentity(
@@ -145,4 +204,8 @@ function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, milliseconds)
   })
+}
+
+function hasValue(value: string | undefined): boolean {
+  return value !== undefined && value.trim() !== ''
 }

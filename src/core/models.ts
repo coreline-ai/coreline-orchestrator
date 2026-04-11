@@ -35,11 +35,69 @@ export type WorkerCapabilityClass = 'read_only' | 'write_capable'
 export type JobPriority = 'low' | 'normal' | 'high'
 export type SessionExecutionMode = Exclude<ExecutionMode, 'process'>
 export type SessionAttachMode = 'observe' | 'interactive'
+export type SessionRuntimeTransport =
+  | 'websocket'
+  | 'stdio'
+  | 'ipc'
+  | 'file_ndjson'
+export type SessionTranscriptEntryKind =
+  | 'attach'
+  | 'detach'
+  | 'cancel'
+  | 'input'
+  | 'output'
+  | 'ack'
+export type SessionTranscriptStream = 'stdout' | 'stderr' | 'session'
 export type TerminalExecutionStatus =
   | 'completed'
   | 'failed'
   | 'canceled'
   | 'timed_out'
+
+/**
+ * Only `session` mode should promise same-session reattach across reconnects.
+ * `background` may be long-lived, but it must not implicitly promise interactive
+ * continuation after orchestrator restart.
+ */
+export interface SessionRuntimeIdentityRecord {
+  mode: SessionExecutionMode
+  transport: SessionRuntimeTransport
+  transportRootPath?: string
+  runtimeSessionId?: string
+  runtimeInstanceId?: string
+  reattachToken?: string
+  processPid?: number
+  startedAt?: string
+}
+
+export interface SessionTranscriptCursor {
+  outputSequence: number
+  acknowledgedSequence?: number
+  lastEventId?: string
+}
+
+export interface SessionBackpressureState {
+  pendingInputCount?: number
+  pendingOutputCount?: number
+  pendingOutputBytes?: number
+  lastDrainAt?: string
+  lastAckAt?: string
+}
+
+export interface SessionTranscriptEntry {
+  sessionId: string
+  sequence: number
+  timestamp: string
+  kind: SessionTranscriptEntryKind
+  attachMode?: SessionAttachMode
+  clientId?: string
+  reason?: string
+  stream?: SessionTranscriptStream
+  data?: string
+  inputSequence?: number
+  outputSequence?: number
+  acknowledgedSequence?: number
+}
 
 export interface WorkerArtifactReference {
   artifactId: string
@@ -106,6 +164,9 @@ export interface SessionRecord {
   lastAttachedAt?: string
   lastDetachedAt?: string
   closedAt?: string
+  runtimeIdentity?: SessionRuntimeIdentityRecord
+  transcriptCursor?: SessionTranscriptCursor
+  backpressure?: SessionBackpressureState
   metadata?: Record<string, string>
 }
 

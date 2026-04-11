@@ -1,11 +1,24 @@
 import { spawn } from 'node:child_process'
+import { PassThrough } from 'node:stream'
+import { EventEmitter } from 'node:events'
 
 import type { OrchestratorConfig } from '../config/config.js'
-import { WorkerSpawnFailedError } from '../core/errors.js'
+import {
+  SessionReattachFailedError,
+  SessionTransportUnavailableError,
+  WorkerSpawnFailedError,
+} from '../core/errors.js'
 import { buildInvocation } from './invocationBuilder.js'
+import { SessionWorkerClientAdapter } from './sessionWorkerClientAdapter.js'
 import type {
   RuntimeAdapter,
   RuntimeHandle,
+  RuntimeSessionAttachRequest,
+  RuntimeSessionAttachResult,
+  RuntimeSessionDetachRequest,
+  RuntimeSessionInput,
+  RuntimeSessionOutputSubscription,
+  RuntimeSessionReattachRequest,
   RuntimeStatus,
   WorkerInvocation,
   WorkerRuntimeSpec,
@@ -17,6 +30,7 @@ interface ProcessRuntimeAdapterOptions {
     spec: WorkerRuntimeSpec,
     config: OrchestratorConfig,
   ) => WorkerInvocation
+  sessionClientAdapter?: SessionWorkerClientAdapter
 }
 
 export class ProcessRuntimeAdapter implements RuntimeAdapter {
@@ -26,6 +40,7 @@ export class ProcessRuntimeAdapter implements RuntimeAdapter {
     spec: WorkerRuntimeSpec,
     config: OrchestratorConfig,
   ) => WorkerInvocation
+  readonly #sessionClientAdapter: SessionWorkerClientAdapter
 
   constructor(
     config: OrchestratorConfig,
@@ -34,10 +49,24 @@ export class ProcessRuntimeAdapter implements RuntimeAdapter {
     this.#config = config
     this.#gracefulStopTimeoutMs = options.gracefulStopTimeoutMs ?? 5000
     this.#invocationBuilder = options.invocationBuilder ?? buildInvocation
+    this.#sessionClientAdapter =
+      options.sessionClientAdapter ?? new SessionWorkerClientAdapter()
   }
 
   async start(spec: WorkerRuntimeSpec): Promise<RuntimeHandle> {
-    const invocation = this.#invocationBuilder(spec, this.#config)
+    const sessionTransport =
+      spec.mode === 'session'
+        ? await this.#sessionClientAdapter.prepareTransport(
+            spec,
+            this.#config.orchestratorRootDir,
+          )
+        : undefined
+    const invocation = this.#invocationBuilder(
+      sessionTransport === undefined
+        ? spec
+        : { ...spec, sessionTransport: sessionTransport.spec },
+      this.#config,
+    )
 
     return await new Promise<RuntimeHandle>((resolve, reject) => {
       const child = spawn(invocation.command, invocation.args, {
@@ -75,6 +104,7 @@ export class ProcessRuntimeAdapter implements RuntimeAdapter {
           process: child,
           exit,
           timedOut: false,
+          ...(sessionTransport === undefined ? {} : { sessionTransport }),
         }
 
         timeoutId = setTimeout(() => {
@@ -139,10 +169,166 @@ export class ProcessRuntimeAdapter implements RuntimeAdapter {
       return 'missing'
     }
   }
+
+  async attachSession(
+    handle: RuntimeHandle,
+    request: RuntimeSessionAttachRequest,
+  ): Promise<RuntimeSessionAttachResult> {
+    if (handle.sessionTransport === undefined) {
+      throw new SessionTransportUnavailableError(
+        request.sessionId,
+        'attach',
+        'runtime_handle_has_no_session_transport',
+      )
+    }
+
+    return await this.#sessionClientAdapter.attachSession(
+      handle.sessionTransport,
+      {
+        pid: handle.pid,
+        startedAt: handle.startedAt,
+      },
+      request,
+    )
+  }
+
+  async detachSession(
+    handle: RuntimeHandle,
+    request: RuntimeSessionDetachRequest,
+  ): Promise<void> {
+    if (handle.sessionTransport === undefined) {
+      throw new SessionTransportUnavailableError(
+        request.sessionId,
+        'detach',
+        'runtime_handle_has_no_session_transport',
+      )
+    }
+
+    await this.#sessionClientAdapter.detachSession(handle.sessionTransport, request)
+  }
+
+  async sendInput(
+    handle: RuntimeHandle,
+    input: RuntimeSessionInput,
+  ) {
+    if (handle.sessionTransport === undefined) {
+      throw new SessionTransportUnavailableError(
+        input.sessionId,
+        'send_input',
+        'runtime_handle_has_no_session_transport',
+      )
+    }
+
+    return await this.#sessionClientAdapter.sendInput(handle.sessionTransport, input)
+  }
+
+  async readOutput(
+    handle: RuntimeHandle,
+    options: {
+      sessionId: string
+      afterSequence?: number
+      onOutput: (chunk: import('./types.js').RuntimeSessionOutputChunk) => void | Promise<void>
+    },
+  ): Promise<RuntimeSessionOutputSubscription> {
+    if (handle.sessionTransport === undefined) {
+      throw new SessionTransportUnavailableError(
+        options.sessionId,
+        'read_output',
+        'runtime_handle_has_no_session_transport',
+      )
+    }
+
+    return await this.#sessionClientAdapter.readOutput(handle.sessionTransport, options)
+  }
+
+  async reattachSession(
+    request: RuntimeSessionReattachRequest,
+  ): Promise<RuntimeHandle> {
+    if (request.identity.mode !== 'session') {
+      throw new SessionReattachFailedError(
+        request.sessionId,
+        'identity_is_not_session_mode',
+      )
+    }
+
+    if (request.identity.pid === undefined) {
+      throw new SessionReattachFailedError(
+        request.sessionId,
+        'missing_runtime_pid',
+      )
+    }
+
+    const sessionTransport =
+      await this.#sessionClientAdapter.reattachTransport(request)
+
+    return {
+      workerId: request.workerId,
+      pid: request.identity.pid,
+      startedAt: request.identity.startedAt ?? new Date().toISOString(),
+      process: createDetachedRuntimeProcessShim(request.identity.pid),
+      exit: waitForDetachedProcessExit(request.identity.pid),
+      timedOut: false,
+      sessionTransport,
+    }
+  }
 }
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, milliseconds)
   })
+}
+
+function createDetachedRuntimeProcessShim(pid: number) {
+  const emitter = new EventEmitter() as EventEmitter & {
+    stdin: null
+    stdout: PassThrough
+    stderr: PassThrough
+    pid: number
+    exitCode: number | null
+    signalCode: NodeJS.Signals | null
+    kill: (signal?: NodeJS.Signals | number) => boolean
+  }
+
+  emitter.stdin = null
+  emitter.stdout = new PassThrough()
+  emitter.stderr = new PassThrough()
+  emitter.pid = pid
+  emitter.exitCode = null
+  emitter.signalCode = null
+  emitter.kill = (signal = 'SIGTERM') => {
+    try {
+      process.kill(pid, signal)
+      return true
+    } catch (error) {
+      if (error instanceof Error && 'code' in error && error.code === 'ESRCH') {
+        return false
+      }
+
+      throw error
+    }
+  }
+
+  return emitter as unknown as RuntimeHandle['process']
+}
+
+async function waitForDetachedProcessExit(
+  pid: number,
+): Promise<{ exitCode: number | null; signal: NodeJS.Signals | null }> {
+  while (true) {
+    try {
+      process.kill(pid, 0)
+      await delay(50)
+    } catch (error) {
+      if (error instanceof Error && 'code' in error && error.code === 'EPERM') {
+        await delay(50)
+        continue
+      }
+
+      return {
+        exitCode: null,
+        signal: null,
+      }
+    }
+  }
 }

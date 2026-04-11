@@ -4,6 +4,7 @@ import type { Context } from 'hono'
 import { z } from 'zod'
 
 import type { ApiExposureMode } from '../config/config.js'
+import type { AuditEventPayload } from '../core/audit.js'
 import { OrchestratorError } from '../core/errors.js'
 import type { OrchestratorEvent } from '../core/events.js'
 import {
@@ -13,9 +14,12 @@ import {
   type JobRecord,
   type JobResultRecord,
   type SessionRecord,
+  type SessionTranscriptEntry,
   type WorkerRecord,
 } from '../core/models.js'
 import type { LogPage } from '../logs/logIndex.js'
+import { resolveManifestedFilePath } from '../storage/manifestTransport.js'
+import type { SessionDiagnostics } from '../sessions/sessionManager.js'
 
 const metadataValueSchema = z.union([z.string(), z.number(), z.boolean()])
 
@@ -90,9 +94,71 @@ export const eventStreamQuerySchema = z.object({
   event_type: z.string().trim().min(1).optional(),
 })
 
+export const listAuditQuerySchema = z.object({
+  offset: z.coerce.number().int().min(0).default(0),
+  limit: z.coerce.number().int().min(1).max(500).default(100),
+  actor_id: z.string().trim().min(1).optional(),
+  action: z.string().trim().min(1).optional(),
+  resource_kind: z.enum(['job', 'worker', 'session', 'system']).optional(),
+  outcome: z.enum(['allowed', 'denied']).optional(),
+})
+
 export const sessionStreamQuerySchema = z.object({
   cursor: z.coerce.number().int().min(0).default(0),
   transport: z.enum(['sse', 'websocket']).default('sse'),
+})
+
+export const sessionTranscriptQuerySchema = z.object({
+  after_sequence: z.coerce.number().int().min(0).optional(),
+  after_output_sequence: z.coerce.number().int().min(0).optional(),
+  limit: z.coerce.number().int().min(1).max(1000).default(200),
+  kind: z
+    .enum(['attach', 'detach', 'cancel', 'input', 'output', 'ack'])
+    .optional(),
+})
+
+const websocketEventTypeSchema = z.union([
+  z.string().trim().min(1),
+  z.array(z.string().trim().min(1)).min(1),
+])
+
+export const websocketSubscribeMessageSchema = z.object({
+  type: z.literal('subscribe'),
+  cursor: z.coerce.number().int().min(0).default(0),
+  history_limit: z.coerce.number().int().min(0).max(500).default(50),
+  event_type: websocketEventTypeSchema.optional(),
+  client_id: z.string().trim().min(1).optional(),
+  mode: z.enum(['observe', 'interactive']).optional(),
+})
+
+export const websocketDetachMessageSchema = z.object({
+  type: z.literal('detach'),
+  reason: z.string().trim().min(1).optional(),
+})
+
+export const websocketInputMessageSchema = z.object({
+  type: z.literal('input'),
+  data: z.string().min(1),
+  sequence: z.coerce.number().int().min(0).optional(),
+})
+
+export const websocketAckMessageSchema = z.object({
+  type: z.literal('ack'),
+  acknowledged_sequence: z.coerce.number().int().min(0),
+})
+
+export const websocketResumeMessageSchema = z.object({
+  type: z.literal('resume'),
+  after_sequence: z.coerce.number().int().min(0).optional(),
+})
+
+export const websocketCancelMessageSchema = z.object({
+  type: z.literal('cancel'),
+  reason: z.string().trim().min(1).optional(),
+})
+
+export const websocketPingMessageSchema = z.object({
+  type: z.literal('ping'),
 })
 
 export interface ApiWorkerRestartResponse {
@@ -289,6 +355,42 @@ export function toApiSessionDetail(session: SessionRecord) {
     last_attached_at: session.lastAttachedAt ?? null,
     last_detached_at: session.lastDetachedAt ?? null,
     closed_at: session.closedAt ?? null,
+    runtime:
+      session.runtimeIdentity === undefined
+        ? null
+        : {
+            transport: session.runtimeIdentity.transport,
+            reattach_supported:
+              session.mode === 'session' &&
+              (session.runtimeIdentity.runtimeSessionId !== undefined ||
+                session.runtimeIdentity.reattachToken !== undefined),
+            runtime_session_id:
+              session.runtimeIdentity.runtimeSessionId ?? null,
+            runtime_instance_id:
+              session.runtimeIdentity.runtimeInstanceId ?? null,
+          },
+    transcript_cursor:
+      session.transcriptCursor === undefined
+        ? null
+        : {
+            output_sequence: session.transcriptCursor.outputSequence,
+            acknowledged_sequence:
+              session.transcriptCursor.acknowledgedSequence ?? null,
+            last_event_id: session.transcriptCursor.lastEventId ?? null,
+          },
+    backpressure:
+      session.backpressure === undefined
+        ? null
+        : {
+            pending_input_count:
+              session.backpressure.pendingInputCount ?? null,
+            pending_output_count:
+              session.backpressure.pendingOutputCount ?? null,
+            pending_output_bytes:
+              session.backpressure.pendingOutputBytes ?? null,
+            last_drain_at: session.backpressure.lastDrainAt ?? null,
+            last_ack_at: session.backpressure.lastAckAt ?? null,
+          },
     metadata: session.metadata ?? {},
   }
 }
@@ -299,6 +401,45 @@ export function toApiSessionLifecycleResponse(
   return {
     session_id: session.sessionId,
     status: session.status,
+  }
+}
+
+export function toApiSessionTranscriptEntry(entry: SessionTranscriptEntry) {
+  return {
+    session_id: entry.sessionId,
+    sequence: entry.sequence,
+    timestamp: entry.timestamp,
+    kind: entry.kind,
+    attach_mode: entry.attachMode ?? null,
+    client_id: entry.clientId ?? null,
+    reason: entry.reason ?? null,
+    stream: entry.stream ?? null,
+    data: entry.data ?? null,
+    input_sequence: entry.inputSequence ?? null,
+    output_sequence: entry.outputSequence ?? null,
+    acknowledged_sequence: entry.acknowledgedSequence ?? null,
+  }
+}
+
+export function toApiSessionDiagnostics(diagnostics: SessionDiagnostics) {
+  return {
+    session: toApiSessionDetail(diagnostics.session),
+    transcript: {
+      total_entries: diagnostics.transcript.totalEntries,
+      latest_sequence: diagnostics.transcript.latestSequence,
+      latest_output_sequence: diagnostics.transcript.latestOutputSequence,
+      last_activity_at: diagnostics.transcript.lastActivityAt,
+      last_input_at: diagnostics.transcript.lastInputAt,
+      last_output_at: diagnostics.transcript.lastOutputAt,
+      last_acknowledged_sequence:
+        diagnostics.transcript.lastAcknowledgedSequence,
+    },
+    health: {
+      idle_ms: diagnostics.health.idleMs,
+      heartbeat_state: diagnostics.health.heartbeatState,
+      stuck: diagnostics.health.stuck,
+      reasons: diagnostics.health.reasons,
+    },
   }
 }
 
@@ -376,6 +517,40 @@ export function toApiEvent(event: OrchestratorEvent) {
   }
 }
 
+export function toApiAuditEvent(
+  event: OrchestratorEvent<AuditEventPayload>,
+  visibility: ApiVisibilityOptions = { redactSensitiveFields: false },
+) {
+  return {
+    event_id: event.eventId,
+    timestamp: event.timestamp,
+    actor_id: event.payload.actorId,
+    actor_type: event.payload.actorType,
+    token_id: event.payload.tokenId,
+    action: event.payload.action,
+    outcome: event.payload.outcome,
+    required_scope: event.payload.requiredScope,
+    resource_kind: event.payload.resourceKind,
+    resource_id: event.payload.resourceId,
+    job_id: event.jobId ?? null,
+    worker_id: event.workerId ?? null,
+    session_id: event.sessionId ?? null,
+    repo_path: redactPath(event.payload.repoPath, visibility),
+    details:
+      event.payload.details === undefined
+        ? {}
+        : redactMetadata(
+            Object.fromEntries(
+              Object.entries(event.payload.details).map(([key, value]) => [
+                key,
+                value === null ? 'null' : String(value),
+              ]),
+            ),
+            visibility,
+          ),
+  }
+}
+
 export async function readJsonFileIfExists<T>(
   filePath: string | undefined,
 ): Promise<T | null> {
@@ -384,7 +559,8 @@ export async function readJsonFileIfExists<T>(
   }
 
   try {
-    const rawValue = await readFile(filePath, 'utf8')
+    const resolvedPath = await resolveManifestedFilePath(filePath)
+    const rawValue = await readFile(resolvedPath ?? filePath, 'utf8')
     return JSON.parse(rawValue) as T
   } catch (error) {
     if (error instanceof Error && 'code' in error && error.code === 'ENOENT') {

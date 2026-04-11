@@ -1,21 +1,20 @@
 import type { Hono } from 'hono'
 
 import type { OrchestratorConfig } from '../config/config.js'
+import { resolveApiPrincipal } from './auth.js'
 import {
-  AuthenticationRequiredError,
-  InvalidConfigurationError,
   OrchestratorError,
 } from '../core/errors.js'
 
 export function applyApiMiddleware(
   app: Hono,
-  config: Pick<OrchestratorConfig, 'apiExposure' | 'apiAuthToken'>,
+  config: Pick<OrchestratorConfig, 'apiExposure' | 'apiAuthToken' | 'apiAuthTokens'>,
 ): void {
   app.use('*', async (c, next) => {
     const startedAt = Date.now()
 
     try {
-      enforceApiAuthentication(c.req.raw, config)
+      void resolveApiPrincipal(c.req.raw, config)
       await next()
     } finally {
       c.header('x-response-time', `${Date.now() - startedAt}ms`)
@@ -48,7 +47,7 @@ export function applyApiMiddleware(
 
 function normalizeErrorResponse(
   error: unknown,
-  config: Pick<OrchestratorConfig, 'apiExposure' | 'apiAuthToken'>,
+  config: Pick<OrchestratorConfig, 'apiExposure' | 'apiAuthToken' | 'apiAuthTokens'>,
 ): {
   status: number
   body: {
@@ -102,6 +101,7 @@ function mapErrorStatus(code: string): number {
       return 400
     case 'AUTHENTICATION_REQUIRED':
       return 401
+    case 'AUTHORIZATION_SCOPE_DENIED':
     case 'REPO_NOT_ALLOWED':
     case 'ARTIFACT_ACCESS_DENIED':
       return 403
@@ -119,57 +119,6 @@ function mapErrorStatus(code: string): number {
     default:
       return 500
   }
-}
-
-function enforceApiAuthentication(
-  request: Request,
-  config: Pick<OrchestratorConfig, 'apiExposure' | 'apiAuthToken'>,
-): void {
-  const expectedToken = config.apiAuthToken?.trim()
-  const authRequired =
-    expectedToken !== undefined || config.apiExposure === 'untrusted_network'
-
-  if (!authRequired) {
-    return
-  }
-
-  if (expectedToken === undefined) {
-    throw new InvalidConfigurationError(
-      'ORCH_API_TOKEN',
-      'External API exposure requires ORCH_API_TOKEN.',
-    )
-  }
-
-  const providedToken = extractApiToken(request)
-  if (providedToken === null) {
-    throw new AuthenticationRequiredError('missing_token')
-  }
-
-  if (providedToken !== expectedToken) {
-    throw new AuthenticationRequiredError('invalid_token')
-  }
-}
-
-function extractApiToken(request: Request): string | null {
-  const authorizationHeader = request.headers.get('authorization')
-  if (authorizationHeader !== null) {
-    const bearerMatch = authorizationHeader.match(/^Bearer\s+(.+)$/i)
-    if (bearerMatch?.[1] !== undefined) {
-      return bearerMatch[1].trim()
-    }
-  }
-
-  const headerToken = request.headers.get('x-orch-api-token')?.trim()
-  if (headerToken !== undefined && headerToken !== '') {
-    return headerToken
-  }
-
-  const queryToken = new URL(request.url).searchParams.get('access_token')?.trim()
-  if (queryToken !== undefined && queryToken !== '') {
-    return queryToken
-  }
-
-  return null
 }
 
 function toSnakeCaseRecord(
@@ -191,7 +140,7 @@ function toSnakeCase(value: string): string {
 
 function redactErrorMessage(
   error: OrchestratorError,
-  config: Pick<OrchestratorConfig, 'apiExposure' | 'apiAuthToken'>,
+  config: Pick<OrchestratorConfig, 'apiExposure' | 'apiAuthToken' | 'apiAuthTokens'>,
 ): string {
   if (
     config.apiExposure === 'untrusted_network' &&
@@ -206,7 +155,7 @@ function redactErrorMessage(
 function redactErrorDetails(
   code: string,
   details: Record<string, string | number | boolean | null>,
-  config: Pick<OrchestratorConfig, 'apiExposure' | 'apiAuthToken'>,
+  config: Pick<OrchestratorConfig, 'apiExposure' | 'apiAuthToken' | 'apiAuthTokens'>,
 ): Record<string, string | number | boolean | null> | undefined {
   if (config.apiExposure !== 'untrusted_network') {
     return details

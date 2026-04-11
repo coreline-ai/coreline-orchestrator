@@ -15,9 +15,18 @@ import type {
 } from '../../core/models.js'
 import type { StateStore } from '../../storage/types.js'
 import {
+  readObjectStoreManifest,
+  resolveManifestedFilePath,
+} from '../../storage/manifestTransport.js'
+import {
   createApiVisibilityOptions,
   toApiArtifact,
 } from '../../types/api.js'
+import {
+  assertAuthorizedJob,
+  assertAuthorizedWorker,
+  requireApiScope,
+} from '../auth.js'
 
 interface ArtifactsRouterDependencies {
   stateStore: StateStore
@@ -27,6 +36,9 @@ interface ArtifactsRouterDependencies {
 interface ResolvedArtifact {
   record: ArtifactRecord
   absolutePath: string
+  repoPath: string
+  jobId?: string
+  workerId?: string
 }
 
 export function createArtifactsRouter(
@@ -38,6 +50,11 @@ export function createArtifactsRouter(
   })
 
   app.get('/:artifactId', async (c) => {
+    const principal = requireApiScope(
+      c.req.raw,
+      dependencies.config,
+      'artifacts:read',
+    )
     const artifact = await resolveArtifact(
       dependencies.stateStore,
       c.req.param('artifactId'),
@@ -45,11 +62,17 @@ export function createArtifactsRouter(
     if (artifact === null) {
       throw new ArtifactNotFoundError(c.req.param('artifactId'))
     }
+    await assertAuthorizedArtifact(principal, dependencies.stateStore, artifact)
 
     return c.json(toApiArtifact(artifact.record, visibility))
   })
 
   app.get('/:artifactId/content', async (c) => {
+    const principal = requireApiScope(
+      c.req.raw,
+      dependencies.config,
+      'artifacts:read',
+    )
     const artifact = await resolveArtifact(
       dependencies.stateStore,
       c.req.param('artifactId'),
@@ -57,6 +80,7 @@ export function createArtifactsRouter(
     if (artifact === null) {
       throw new ArtifactNotFoundError(c.req.param('artifactId'))
     }
+    await assertAuthorizedArtifact(principal, dependencies.stateStore, artifact)
 
     const contents = await readFile(artifact.absolutePath)
     return c.body(contents, 200, {
@@ -95,6 +119,10 @@ async function resolveArtifact(
     absolutePath,
     artifactReference.repoPath,
     artifactReference.createdAt,
+    {
+      jobId: artifactReference.jobId,
+      workerId: artifactReference.workerId,
+    },
   )
 }
 
@@ -118,6 +146,9 @@ async function createSyntheticJobArtifact(
     absolutePath,
     job.repoPath,
     job.updatedAt,
+    {
+      jobId: job.jobId,
+    },
   )
 }
 
@@ -138,6 +169,10 @@ async function createSyntheticWorkerArtifact(
       absolutePath,
       worker.repoPath,
       worker.updatedAt,
+      {
+        jobId: worker.jobId,
+        workerId: worker.workerId,
+      },
     )
   }
 
@@ -154,6 +189,10 @@ async function createSyntheticWorkerArtifact(
       absolutePath,
       worker.repoPath,
       worker.updatedAt,
+      {
+        jobId: worker.jobId,
+        workerId: worker.workerId,
+      },
     )
   }
 
@@ -192,9 +231,16 @@ async function createArtifactRecord(
   absolutePath: string,
   allowedRootPath: string,
   createdAt: string,
+  ids: {
+    jobId?: string
+    workerId?: string
+  } = {},
 ): Promise<ResolvedArtifact | null> {
   try {
-    const canonicalPath = await realpath(absolutePath)
+    const manifest = await readObjectStoreManifest(absolutePath)
+    const resolvedArtifactPath =
+      (await resolveManifestedFilePath(absolutePath)) ?? absolutePath
+    const canonicalPath = await realpath(resolvedArtifactPath)
     const canonicalRootPath = await realpath(resolve(allowedRootPath)).catch(
       () => resolve(allowedRootPath),
     )
@@ -208,11 +254,13 @@ async function createArtifactRecord(
         artifactId,
         kind,
         path: publicPath,
-        contentType: inferContentType(canonicalPath),
-        sizeBytes: fileStat.size,
+        contentType: manifest?.contentType ?? inferContentType(canonicalPath),
+        sizeBytes: manifest?.sizeBytes ?? fileStat.size,
         createdAt,
       },
       absolutePath: canonicalPath,
+      repoPath: allowedRootPath,
+      ...ids,
     }
   } catch (error) {
     if (error instanceof ArtifactAccessDeniedError) {
@@ -229,6 +277,33 @@ async function createArtifactRecord(
 
     throw error
   }
+}
+
+async function assertAuthorizedArtifact(
+  principal: ReturnType<typeof requireApiScope>,
+  stateStore: StateStore,
+  artifact: ResolvedArtifact,
+): Promise<void> {
+  if (artifact.workerId !== undefined) {
+    const worker = await stateStore.getWorker(artifact.workerId)
+    if (worker !== null) {
+      assertAuthorizedWorker(principal, worker)
+      return
+    }
+  }
+
+  if (artifact.jobId !== undefined) {
+    const job = await stateStore.getJob(artifact.jobId)
+    if (job !== null) {
+      assertAuthorizedJob(principal, job)
+      return
+    }
+  }
+
+  assertAuthorizedJob(principal, {
+    jobId: artifact.jobId ?? artifact.record.artifactId,
+    repoPath: artifact.repoPath,
+  })
 }
 
 function resolveWorkerArtifactPath(

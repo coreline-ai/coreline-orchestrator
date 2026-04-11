@@ -4,21 +4,28 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
 import type { OrchestratorConfig } from '../config/config.js'
+import { InMemoryControlPlaneCoordinator } from '../control/coordination.js'
 import { EventBus } from '../core/eventBus.js'
 import {
   JobStatus,
+  SessionStatus,
   WorkerStatus,
   type JobRecord,
+  type SessionRecord,
   type WorkerRecord,
 } from '../core/models.js'
 import { WorktreeManager } from '../isolation/worktreeManager.js'
+import { LogCollector } from '../logs/logCollector.js'
 import { CleanupManager } from './cleanup.js'
 import { ResultAggregator } from '../results/resultAggregator.js'
+import { ProcessRuntimeAdapter } from '../runtime/processRuntimeAdapter.js'
 import { CapacityPolicy, ConflictPolicy, RetryPolicy } from '../scheduler/policies.js'
 import { JobQueue } from '../scheduler/queue.js'
 import { Scheduler, type SchedulerWorkerManager } from '../scheduler/scheduler.js'
+import { SessionManager } from '../sessions/sessionManager.js'
 import { FileStateStore } from '../storage/fileStateStore.js'
 import type { StateStore } from '../storage/types.js'
+import { WorkerManager } from '../workers/workerManager.js'
 import { Reconciler } from './reconciler.js'
 
 const tempDirs: string[] = []
@@ -47,13 +54,99 @@ async function createTempDir(prefix: string): Promise<string> {
   return directoryPath
 }
 
+async function createSessionWorkerScript(directoryPath: string): Promise<string> {
+  const scriptPath = join(directoryPath, 'session-worker.ts')
+  await writeFile(
+    scriptPath,
+    `#!/usr/bin/env bun
+import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises'
+
+const controlPath = process.env.ORCH_SESSION_CONTROL_PATH
+const inputPath = process.env.ORCH_SESSION_INPUT_PATH
+const outputPath = process.env.ORCH_SESSION_OUTPUT_PATH
+const identityPath = process.env.ORCH_SESSION_IDENTITY_PATH
+const runtimeId = process.env.ORCH_SESSION_RUNTIME_ID
+const runtimeInstanceId = process.env.ORCH_SESSION_INSTANCE_ID
+const reattachToken = process.env.ORCH_SESSION_REATTACH_TOKEN
+const rootDir = process.env.ORCH_SESSION_TRANSPORT_ROOT
+
+if (!controlPath || !inputPath || !outputPath || !identityPath || !runtimeId || !runtimeInstanceId || !reattachToken || !rootDir) {
+  throw new Error('missing session transport env')
+}
+
+await mkdir(rootDir, { recursive: true })
+await writeFile(identityPath, JSON.stringify({
+  mode: 'session',
+  transport: 'file_ndjson',
+  transportRootPath: rootDir,
+  runtimeSessionId: runtimeId,
+  runtimeInstanceId,
+  reattachToken,
+  processPid: process.pid,
+  startedAt: new Date().toISOString(),
+}, null, 2) + '\\n', 'utf8')
+
+let currentSessionId = ''
+let controlLinesProcessed = 0
+let sequence = 0
+
+async function emit(data, sessionId = currentSessionId) {
+  sequence += 1
+  await appendFile(outputPath, JSON.stringify({
+    sessionId,
+    sequence,
+    timestamp: new Date().toISOString(),
+    stream: 'session',
+    data,
+  }) + '\\n', 'utf8')
+}
+
+async function processLines() {
+  const controlRaw = await readFile(controlPath, 'utf8').catch(() => '')
+  const controlLines = controlRaw.split('\\n').map((line) => line.trim()).filter(Boolean)
+  for (const line of controlLines.slice(controlLinesProcessed)) {
+    const message = JSON.parse(line)
+    if (message.type === 'attach') {
+      currentSessionId = message.sessionId
+      await emit('attached:' + message.sessionId, currentSessionId)
+    }
+  }
+  controlLinesProcessed = controlLines.length
+}
+
+const timer = setInterval(() => {
+  void processLines()
+}, 25)
+
+process.on('SIGTERM', async () => {
+  clearInterval(timer)
+  await emit('terminated', currentSessionId)
+  process.exit(0)
+})
+
+await emit('worker-ready')
+setInterval(() => {}, 1000)
+`,
+    'utf8',
+  )
+  await chmod(scriptPath, 0o755)
+  return scriptPath
+}
+
 function createConfig(allowedRepoRoots: string[]): OrchestratorConfig {
   return {
     apiHost: '127.0.0.1',
     apiPort: 0,
     apiExposure: 'trusted_local',
     apiAuthToken: undefined,
-    maxActiveWorkers: 2,
+  controlPlaneBackend: 'memory',
+  dispatchQueueBackend: 'memory',
+  eventStreamBackend: 'memory',
+  artifactTransportMode: 'shared_filesystem',
+stateStoreBackend: 'file',
+    stateStoreImportFromFile: false,
+    stateStoreSqlitePath: undefined,
+        maxActiveWorkers: 2,
     maxWriteWorkersPerRepo: 1,
     allowedRepoRoots,
     orchestratorRootDir: '.orchestrator',
@@ -124,7 +217,12 @@ class FakeWorkerManager implements SchedulerWorkerManager {
   }
 }
 
-async function createReconcilerHarness(workerStaleAfterMs = 0) {
+async function createReconcilerHarness(
+  workerStaleAfterMs = 0,
+  options: {
+    controlPlaneCoordinator?: InMemoryControlPlaneCoordinator
+  } = {},
+) {
   const repoPath = await createTempDir('coreline-orch-reconciler-repo-')
   const config = createConfig([repoPath])
   const stateStore = new FileStateStore(join(repoPath, '.orchestrator-state'))
@@ -153,6 +251,13 @@ async function createReconcilerHarness(workerStaleAfterMs = 0) {
       worktreeManager: new WorktreeManager('.orchestrator'),
       orchestratorRootDir: '.orchestrator',
     }),
+    ...(options.controlPlaneCoordinator === undefined
+      ? {}
+      : {
+          controlPlane: {
+            coordinator: options.controlPlaneCoordinator,
+          },
+        }),
     workerStaleAfterMs,
   })
 
@@ -160,6 +265,7 @@ async function createReconcilerHarness(workerStaleAfterMs = 0) {
     repoPath,
     stateStore,
     queue,
+    controlPlaneCoordinator: options.controlPlaneCoordinator,
     reconciler,
   }
 }
@@ -225,6 +331,28 @@ async function seedWorker(
 
   await stateStore.createWorker(worker)
   return worker
+}
+
+async function seedSession(
+  stateStore: FileStateStore,
+  overrides: Partial<SessionRecord> = {},
+): Promise<SessionRecord> {
+  const session: SessionRecord = {
+    sessionId: overrides.sessionId ?? 'sess_reconcile_test',
+    workerId: overrides.workerId ?? 'wrk_reconcile_test',
+    jobId: overrides.jobId ?? 'job_reconcile_test',
+    mode: 'session',
+    status: overrides.status ?? SessionStatus.Active,
+    attachMode: 'interactive',
+    attachedClients: 1,
+    createdAt: '2026-04-11T00:00:00.000Z',
+    updatedAt: '2026-04-11T00:00:00.000Z',
+    metadata: {},
+    ...overrides,
+  }
+
+  await stateStore.createSession(session)
+  return session
 }
 
 describe('reconciler', () => {
@@ -321,6 +449,162 @@ describe('reconciler', () => {
       WorkerStatus.Active,
     )
     expect(queue.peek()).toBeNull()
+  })
+
+  test('does not reconcile stale worker records when a fresh control-plane worker heartbeat exists', async () => {
+    const controlPlaneCoordinator = new InMemoryControlPlaneCoordinator()
+    const { queue, reconciler, repoPath, stateStore } = await createReconcilerHarness(
+      0,
+      {
+        controlPlaneCoordinator,
+      },
+    )
+    const job = await seedJob(stateStore, repoPath, {
+      jobId: 'job_active_assignment',
+      workerIds: ['wrk_active_assignment'],
+    })
+    await seedWorker(stateStore, repoPath, {
+      workerId: 'wrk_active_assignment',
+      jobId: job.jobId,
+      status: WorkerStatus.Active,
+      pid: 999_999,
+      updatedAt: '2026-04-11T00:00:00.000Z',
+    })
+    await controlPlaneCoordinator.upsertWorkerHeartbeat({
+      workerId: 'wrk_active_assignment',
+      jobId: job.jobId,
+      executorId: 'exec_local',
+      repoPath,
+      ttlMs: 5_000,
+    })
+
+    const report = await reconciler.reconcile()
+
+    expect(report.orphanedWorkers).toBe(0)
+    expect((await stateStore.getWorker('wrk_active_assignment'))?.status).toBe(
+      WorkerStatus.Active,
+    )
+    expect(queue.peek()).toBeNull()
+  })
+
+  test('reattaches session-mode workers during forced recovery instead of requeueing the job', async () => {
+    const repoPath = await createTempDir('coreline-orch-reconciler-session-repo-')
+    const supportDir = await createTempDir('coreline-orch-reconciler-session-support-')
+    const scriptPath = await createSessionWorkerScript(supportDir)
+    const config = createConfig([repoPath])
+    config.workerBinary = scriptPath
+    const stateStore = new FileStateStore(join(repoPath, '.orchestrator-state'))
+    await stateStore.initialize()
+    const queue = new JobQueue()
+    const eventBus = new EventBus()
+    const runtimeAdapter = new ProcessRuntimeAdapter(config, {
+      gracefulStopTimeoutMs: 100,
+    })
+    const sessionManager = new SessionManager({
+      stateStore,
+      eventBus,
+    })
+    const workerManager = new WorkerManager({
+      stateStore,
+      runtimeAdapter,
+      worktreeManager: new WorktreeManager('.orchestrator'),
+      logCollector: new LogCollector(),
+      resultAggregator: new ResultAggregator(),
+      eventBus,
+      config,
+      sessionManager,
+    })
+    const scheduler = new Scheduler({
+      stateStore,
+      workerManager: new FakeWorkerManager(stateStore, config),
+      queue,
+      eventBus,
+      config,
+      policies: {
+        capacity: new CapacityPolicy(),
+        conflict: new ConflictPolicy(config.maxWriteWorkersPerRepo),
+        retry: new RetryPolicy(),
+      },
+    })
+    const reconciler = new Reconciler({
+      stateStore,
+      scheduler,
+      eventBus,
+      resultAggregator: new ResultAggregator(),
+      runtimeRecoveryManager: workerManager,
+      sessionManager,
+      cleanupManager: new CleanupManager({
+        stateStore,
+        worktreeManager: new WorktreeManager('.orchestrator'),
+        orchestratorRootDir: '.orchestrator',
+      }),
+      workerStaleAfterMs: 60_000,
+    })
+
+    const handle = await runtimeAdapter.start({
+      workerId: 'wrk_session_recover',
+      jobId: 'job_session_recover',
+      workerIndex: 0,
+      repoPath,
+      prompt: 'Recover me interactively',
+      timeoutSeconds: 30,
+      resultPath: join(repoPath, '.orchestrator', 'results', 'wrk_session_recover.json'),
+      logPath: join(repoPath, '.orchestrator', 'logs', 'wrk_session_recover.ndjson'),
+      mode: 'session',
+    })
+    const attachResult = await runtimeAdapter.attachSession!(handle, {
+      sessionId: 'sess_session_recover',
+      mode: 'interactive',
+    })
+
+    await seedJob(stateStore, repoPath, {
+      jobId: 'job_session_recover',
+      executionMode: 'session',
+      isolationMode: 'same-dir',
+      workerIds: ['wrk_session_recover'],
+    })
+    await seedWorker(stateStore, repoPath, {
+      workerId: 'wrk_session_recover',
+      jobId: 'job_session_recover',
+      status: WorkerStatus.Active,
+      runtimeMode: 'session',
+      capabilityClass: 'read_only',
+      sessionId: 'sess_session_recover',
+      pid: handle.pid,
+      startedAt: handle.startedAt,
+      updatedAt: new Date().toISOString(),
+    })
+    await seedSession(stateStore, {
+      sessionId: 'sess_session_recover',
+      workerId: 'wrk_session_recover',
+      jobId: 'job_session_recover',
+      mode: 'session',
+      status: SessionStatus.Active,
+      runtimeIdentity: {
+        mode: 'session',
+        transport: attachResult.identity.transport!,
+        transportRootPath: attachResult.identity.transportRootPath,
+        runtimeSessionId: attachResult.identity.runtimeSessionId,
+        runtimeInstanceId: attachResult.identity.runtimeInstanceId,
+        reattachToken: attachResult.identity.reattachToken,
+        processPid: handle.pid,
+        startedAt: handle.startedAt,
+      },
+      transcriptCursor: attachResult.transcriptCursor,
+      backpressure: attachResult.backpressure,
+    })
+
+    const report = await reconciler.reconcile({ forceRuntimeRecovery: true })
+
+    expect(report.orphanedWorkers).toBe(1)
+    expect(report.requeuedJobs).toBe(0)
+    expect((await stateStore.getWorker('wrk_session_recover'))?.status).toBe(
+      WorkerStatus.Active,
+    )
+    expect(queue.peek()).toBeNull()
+
+    await workerManager.stopWorker('wrk_session_recover', 'cleanup')
+    await workerManager.waitForWorkerSettlement('wrk_session_recover')
   })
 
   test('finalizes non-terminal jobs when all workers are already terminal', async () => {

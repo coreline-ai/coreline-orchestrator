@@ -1,6 +1,7 @@
 import { safeWriteFile } from '../storage/safeWrite.js'
+import type { ControlPlaneCoordinator } from '../control/coordination.js'
 import { createEvent } from '../core/events.js'
-import type { EventBus } from '../core/eventBus.js'
+import type { EventPublisher } from '../core/eventBus.js'
 import {
   JobStatus,
   WorkerStatus,
@@ -18,13 +19,16 @@ import {
 import { OrchestratorError } from '../core/errors.js'
 import type { ResultAggregator } from '../results/resultAggregator.js'
 import {
+  canReattachPersistedRuntimeIdentity,
   classifyWorkerRecoveryDisposition,
   getPersistedRuntimeIdentity,
+  getPersistedRuntimeIdentityFromSession,
   isPersistedRuntimeIdentityLive,
   terminatePersistedRuntimeIdentity,
 } from '../runtime/recovery.js'
-import type { RecoveryDisposition } from '../runtime/types.js'
+import type { PersistedRuntimeIdentity, RecoveryDisposition, RuntimeHandle } from '../runtime/types.js'
 import type { Scheduler } from '../scheduler/scheduler.js'
+import type { SessionManager } from '../sessions/sessionManager.js'
 import type { StateStore } from '../storage/types.js'
 import type { CleanupManager } from './cleanup.js'
 
@@ -46,9 +50,16 @@ export interface ReconcileOptions {
 interface ReconcilerDependencies {
   stateStore: StateStore
   scheduler: Scheduler
-  eventBus: EventBus
+  eventBus: EventPublisher
   resultAggregator: ResultAggregator
+  runtimeRecoveryManager?: {
+    reattachWorkerRuntime(workerId: string): Promise<RuntimeHandle | null>
+  }
+  sessionManager?: SessionManager
   cleanupManager?: CleanupManager
+  controlPlane?: {
+    coordinator: Pick<ControlPlaneCoordinator, 'getWorkerAssignment'>
+  }
   reconcileIntervalMs?: number
   cleanupMaxAgeMs?: number
   workerStaleAfterMs?: number
@@ -57,9 +68,12 @@ interface ReconcilerDependencies {
 export class Reconciler {
   readonly #stateStore: StateStore
   readonly #scheduler: Scheduler
-  readonly #eventBus: EventBus
+  readonly #eventBus: EventPublisher
   readonly #resultAggregator: ResultAggregator
+  readonly #runtimeRecoveryManager?: ReconcilerDependencies['runtimeRecoveryManager']
+  readonly #sessionManager?: SessionManager
   readonly #cleanupManager?: CleanupManager
+  readonly #controlPlane?: ReconcilerDependencies['controlPlane']
   readonly #reconcileIntervalMs: number
   readonly #cleanupMaxAgeMs: number
   readonly #workerStaleAfterMs: number
@@ -71,7 +85,10 @@ export class Reconciler {
     this.#scheduler = dependencies.scheduler
     this.#eventBus = dependencies.eventBus
     this.#resultAggregator = dependencies.resultAggregator
+    this.#runtimeRecoveryManager = dependencies.runtimeRecoveryManager
+    this.#sessionManager = dependencies.sessionManager
     this.#cleanupManager = dependencies.cleanupManager
+    this.#controlPlane = dependencies.controlPlane
     this.#reconcileIntervalMs = dependencies.reconcileIntervalMs ?? 15_000
     this.#cleanupMaxAgeMs = dependencies.cleanupMaxAgeMs ?? 24 * 60 * 60 * 1000
     this.#workerStaleAfterMs = dependencies.workerStaleAfterMs ?? 5_000
@@ -139,8 +156,10 @@ export class Reconciler {
           continue
         }
 
-        await this.#repairWorker(worker, recoveryDisposition)
-        repairedJobIds.add(worker.jobId)
+        const repairOutcome = await this.#repairWorker(worker, recoveryDisposition)
+        if (repairOutcome === 'finalized') {
+          repairedJobIds.add(worker.jobId)
+        }
         report.orphanedWorkers += 1
         report.repairedWorkers += 1
       }
@@ -206,27 +225,55 @@ export class Reconciler {
       return null
     }
 
-    const runtimeIdentity = getPersistedRuntimeIdentity(worker)
+    if (
+      options.forceRuntimeRecovery !== true &&
+      this.#controlPlane !== undefined
+    ) {
+      const assignment = await this.#controlPlane.coordinator.getWorkerAssignment(
+        worker.workerId,
+      )
+      if (
+        assignment !== null &&
+        assignment.status === 'active' &&
+        assignment.heartbeatState === 'active'
+      ) {
+        return null
+      }
+    }
+
+    const runtimeIdentity = await this.#getRecoveryRuntimeIdentity(worker)
     const runtimeLive = isPersistedRuntimeIdentityLive(runtimeIdentity)
+    const sessionReattachable =
+      runtimeIdentity.mode === 'session' &&
+      canReattachPersistedRuntimeIdentity(runtimeIdentity)
 
     return classifyWorkerRecoveryDisposition({
       worker,
       hasRuntimeHandle: false,
       isRuntimeLive: runtimeLive,
+      isSessionReattachable: sessionReattachable,
     })
   }
 
   async #repairWorker(
     worker: WorkerRecord,
     recoveryDisposition: RecoveryDisposition,
-  ): Promise<void> {
-    const runtimeIdentity = getPersistedRuntimeIdentity(worker)
+  ): Promise<'reattached' | 'finalized' | 'noop'> {
+    const runtimeIdentity = await this.#getRecoveryRuntimeIdentity(worker)
     if (recoveryDisposition === 'terminal_noop') {
-      return
+      return 'noop'
     }
 
     if (recoveryDisposition === 'reattach_supported') {
-      return
+      const reattachedHandle =
+        this.#runtimeRecoveryManager === undefined
+          ? null
+          : await this.#attemptRuntimeReattach(worker)
+      if (reattachedHandle !== null) {
+        return 'reattached'
+      }
+
+      recoveryDisposition = 'finalize_lost'
     }
 
     if (recoveryDisposition === 'terminate_only') {
@@ -274,6 +321,12 @@ export class Reconciler {
     }
 
     await this.#stateStore.updateWorker(updatedWorker)
+    if (this.#sessionManager !== undefined) {
+      await this.#sessionManager.closeSessionForWorker(
+        updatedWorker,
+        recoveryReason,
+      )
+    }
     await this.#writeFallbackWorkerResult(updatedWorker)
     await this.#publishEvent(
       'worker.reconciled',
@@ -297,6 +350,39 @@ export class Reconciler {
         workerId: updatedWorker.workerId,
       },
     )
+    return 'finalized'
+  }
+
+  async #getRecoveryRuntimeIdentity(
+    worker: WorkerRecord,
+  ): Promise<PersistedRuntimeIdentity> {
+    if (worker.sessionId === undefined) {
+      return getPersistedRuntimeIdentity(worker)
+    }
+
+    const session = await this.#stateStore.getSession(worker.sessionId)
+    if (session === null || session.status === 'closed') {
+      return getPersistedRuntimeIdentity(worker)
+    }
+
+    const sessionIdentity = getPersistedRuntimeIdentityFromSession(session)
+    if (canReattachPersistedRuntimeIdentity(sessionIdentity)) {
+      return sessionIdentity
+    }
+
+    return getPersistedRuntimeIdentity(worker)
+  }
+
+  async #attemptRuntimeReattach(
+    worker: WorkerRecord,
+  ): Promise<RuntimeHandle | null> {
+    try {
+      return await this.#runtimeRecoveryManager?.reattachWorkerRuntime(
+        worker.workerId,
+      ) ?? null
+    } catch {
+      return null
+    }
   }
 
   async #finalizeRecoveredJob(
@@ -306,6 +392,12 @@ export class Reconciler {
     const workerResults: WorkerResultRecord[] = []
 
     for (const worker of workers) {
+      if (this.#sessionManager !== undefined) {
+        await this.#sessionManager.closeSessionForWorker(
+          worker,
+          'job_finalized_during_reconcile',
+        )
+      }
       const collectedResult =
         worker.resultPath === undefined
           ? null

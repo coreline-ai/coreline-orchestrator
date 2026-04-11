@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises'
 
+import { resolveManifestedFilePath } from '../storage/manifestTransport.js'
 import type { LogLine } from './logCollector.js'
 
 export interface LogPage {
@@ -21,9 +22,10 @@ export class LogIndex {
     }
 
     let rawContents: string
+    const resolvedPath = await resolveManifestedFilePath(logPath)
 
     try {
-      rawContents = await readFile(logPath, 'utf8')
+      rawContents = await readFile(resolvedPath ?? logPath, 'utf8')
     } catch (error) {
       if (error instanceof Error && 'code' in error && error.code === 'ENOENT') {
         return {

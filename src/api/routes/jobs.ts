@@ -3,6 +3,7 @@ import { Hono } from 'hono'
 import type { OrchestratorConfig } from '../../config/config.js'
 import { JobNotFoundError, OrchestratorError } from '../../core/errors.js'
 import type { JobResultRecord } from '../../core/models.js'
+import type { EventPublisher } from '../../core/eventBus.js'
 import type { Scheduler } from '../../scheduler/scheduler.js'
 import type { StateStore } from '../../storage/types.js'
 import {
@@ -19,11 +20,18 @@ import {
   toApiJobResult,
   toApiJobSummary,
 } from '../../types/api.js'
+import {
+  assertAuthorizedJob,
+  canAccessJob,
+  requireApiScope,
+} from '../auth.js'
+import { appendAuditEvent } from '../audit.js'
 
 interface JobsRouterDependencies {
   stateStore: StateStore
   scheduler: Scheduler
   config: OrchestratorConfig
+  eventBus: EventPublisher
 }
 
 export function createJobsRouter(
@@ -35,7 +43,16 @@ export function createJobsRouter(
   })
 
   app.post('/', async (c) => {
+    const principal = requireApiScope(
+      c.req.raw,
+      dependencies.config,
+      'jobs:write',
+    )
     const body = await parseJsonBody(c, createJobRequestSchema)
+    assertAuthorizedJob(principal, {
+      jobId: 'pending',
+      repoPath: body.repo.path,
+    })
     const job = await dependencies.scheduler.submitJob({
       title: body.title,
       description: body.description,
@@ -60,6 +77,24 @@ export function createJobsRouter(
       metadata: normalizeMetadata(body.metadata),
     })
 
+    await appendAuditEvent(
+      {
+        stateStore: dependencies.stateStore,
+        eventBus: dependencies.eventBus,
+      },
+      {
+        principal,
+        action: 'job.create',
+        requiredScope: 'jobs:write',
+        resourceKind: 'job',
+        resourceId: job.jobId,
+        repoPath: job.repoPath,
+        ids: {
+          jobId: job.jobId,
+        },
+      },
+    )
+
     return c.json(
       {
         job_id: job.jobId,
@@ -71,6 +106,11 @@ export function createJobsRouter(
   })
 
   app.get('/', async (c) => {
+    const principal = requireApiScope(
+      c.req.raw,
+      dependencies.config,
+      'jobs:read',
+    )
     const query = parseApiInput(listJobsQuerySchema, c.req.query())
     const jobs = await dependencies.stateStore.listJobs({
       status: query.status,
@@ -78,23 +118,60 @@ export function createJobsRouter(
     })
 
     return c.json({
-      items: jobs.map(toApiJobSummary),
+      items: jobs.filter((job) => canAccessJob(principal, job)).map(toApiJobSummary),
       next_cursor: null,
     })
   })
 
   app.get('/:jobId', async (c) => {
+    const principal = requireApiScope(
+      c.req.raw,
+      dependencies.config,
+      'jobs:read',
+    )
     const job = await getRequiredJob(dependencies.stateStore, c.req.param('jobId'))
+    assertAuthorizedJob(principal, job)
     const result = await readJsonFileIfExists<JobResultRecord>(job.resultPath)
 
     return c.json(toApiJobDetail(job, result, visibility))
   })
 
   app.post('/:jobId/cancel', async (c) => {
+    const principal = requireApiScope(
+      c.req.raw,
+      dependencies.config,
+      'jobs:write',
+    )
     const body = await parseOptionalJsonBody(c, reasonRequestSchema)
+    const existingJob = await getRequiredJob(
+      dependencies.stateStore,
+      c.req.param('jobId'),
+    )
+    assertAuthorizedJob(principal, existingJob)
     const job = await dependencies.scheduler.cancelJob(
       c.req.param('jobId'),
       body.reason,
+    )
+
+    await appendAuditEvent(
+      {
+        stateStore: dependencies.stateStore,
+        eventBus: dependencies.eventBus,
+      },
+      {
+        principal,
+        action: 'job.cancel',
+        requiredScope: 'jobs:write',
+        resourceKind: 'job',
+        resourceId: job.jobId,
+        repoPath: job.repoPath,
+        ids: {
+          jobId: job.jobId,
+        },
+        details: {
+          reason: body.reason ?? 'operator_requested_cancel',
+        },
+      },
     )
 
     return c.json({
@@ -105,10 +182,41 @@ export function createJobsRouter(
   })
 
   app.post('/:jobId/retry', async (c) => {
+    const principal = requireApiScope(
+      c.req.raw,
+      dependencies.config,
+      'jobs:write',
+    )
     const body = await parseOptionalJsonBody(c, reasonRequestSchema)
     void body
 
+    const existingJob = await getRequiredJob(
+      dependencies.stateStore,
+      c.req.param('jobId'),
+    )
+    assertAuthorizedJob(principal, existingJob)
     const retriedJob = await dependencies.scheduler.retryJob(c.req.param('jobId'))
+
+    await appendAuditEvent(
+      {
+        stateStore: dependencies.stateStore,
+        eventBus: dependencies.eventBus,
+      },
+      {
+        principal,
+        action: 'job.retry',
+        requiredScope: 'jobs:write',
+        resourceKind: 'job',
+        resourceId: retriedJob.jobId,
+        repoPath: retriedJob.repoPath,
+        ids: {
+          jobId: retriedJob.jobId,
+        },
+        details: {
+          sourceJobId: existingJob.jobId,
+        },
+      },
+    )
 
     return c.json({
       job_id: retriedJob.jobId,
@@ -118,7 +226,13 @@ export function createJobsRouter(
   })
 
   app.get('/:jobId/results', async (c) => {
+    const principal = requireApiScope(
+      c.req.raw,
+      dependencies.config,
+      'jobs:read',
+    )
     const job = await getRequiredJob(dependencies.stateStore, c.req.param('jobId'))
+    assertAuthorizedJob(principal, job)
     const result = await readJsonFileIfExists<JobResultRecord>(job.resultPath)
     if (result === null) {
       throw new OrchestratorError('ARTIFACT_NOT_FOUND', 'Job result was not found.', {

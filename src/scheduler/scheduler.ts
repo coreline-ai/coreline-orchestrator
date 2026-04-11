@@ -1,9 +1,10 @@
 import { join } from 'node:path'
 
 import type { OrchestratorConfig } from '../config/config.js'
+import type { ControlPlaneCoordinator } from '../control/coordination.js'
 import { InvalidStateTransitionError, JobNotFoundError } from '../core/errors.js'
 import { createEvent } from '../core/events.js'
-import { EventBus } from '../core/eventBus.js'
+import type { EventPublisher } from '../core/eventBus.js'
 import {
   JobStatus,
   WorkerStatus,
@@ -18,7 +19,7 @@ import { assertValidJobTransition, isTerminalJobStatus } from '../core/stateMach
 import { validateRepoPath } from '../isolation/repoPolicy.js'
 import type { StateStore } from '../storage/types.js'
 import { CapacityPolicy, ConflictPolicy, RetryPolicy } from './policies.js'
-import { JobQueue } from './queue.js'
+import { JobQueue, type DispatchQueue } from './queue.js'
 
 export interface CreateJobRequest {
   title: string
@@ -51,27 +52,34 @@ export interface SchedulerWorkerManager {
 export interface SchedulerDependencies {
   stateStore: StateStore
   workerManager: SchedulerWorkerManager
-  queue?: JobQueue
+  queue?: DispatchQueue
   policies?: {
     capacity?: CapacityPolicy
     conflict?: ConflictPolicy
     retry?: RetryPolicy
   }
-  eventBus: EventBus
+  eventBus: EventPublisher
   config: OrchestratorConfig
   dispatchIntervalMs?: number
+  controlPlane?: {
+    coordinator: Pick<ControlPlaneCoordinator, 'acquireLease' | 'releaseLease' | 'getLease'>
+    executorId: string
+    leaseKey?: string
+    leaseTtlMs?: number
+  }
 }
 
 export class Scheduler {
   readonly #stateStore: StateStore
   readonly #workerManager: SchedulerWorkerManager
-  readonly #queue: JobQueue
+  readonly #queue: DispatchQueue
   readonly #capacityPolicy: CapacityPolicy
   readonly #conflictPolicy: ConflictPolicy
   readonly #retryPolicy: RetryPolicy
-  readonly #eventBus: EventBus
+  readonly #eventBus: EventPublisher
   readonly #config: OrchestratorConfig
   readonly #dispatchIntervalMs: number
+  readonly #controlPlane?: SchedulerDependencies['controlPlane']
   #dispatchTimer: ReturnType<typeof setInterval> | null = null
   #dispatching = false
 
@@ -87,6 +95,7 @@ export class Scheduler {
     this.#eventBus = dependencies.eventBus
     this.#config = dependencies.config
     this.#dispatchIntervalMs = dependencies.dispatchIntervalMs ?? 1000
+    this.#controlPlane = dependencies.controlPlane
   }
 
   start(): void {
@@ -103,6 +112,13 @@ export class Scheduler {
     if (this.#dispatchTimer !== null) {
       clearInterval(this.#dispatchTimer)
       this.#dispatchTimer = null
+    }
+
+    if (this.#controlPlane !== undefined) {
+      void this.#controlPlane.coordinator.releaseLease({
+        leaseKey: this.#controlPlane.leaseKey ?? 'scheduler:dispatch',
+        ownerId: this.#controlPlane.executorId,
+      })
     }
   }
 
@@ -206,6 +222,10 @@ export class Scheduler {
     this.#dispatching = true
 
     try {
+      if (!(await this.#acquireDispatchLease())) {
+        return
+      }
+
       const queuedJobs = this.#queue.list()
       const activeWorkers = await this.#getActiveWorkers()
       let activeWorkerCount = activeWorkers.length
@@ -300,8 +320,22 @@ export class Scheduler {
     }
   }
 
-  getQueue(): JobQueue {
+  getQueue(): DispatchQueue {
     return this.#queue
+  }
+
+  async #acquireDispatchLease(): Promise<boolean> {
+    if (this.#controlPlane === undefined) {
+      return true
+    }
+
+    const lease = await this.#controlPlane.coordinator.acquireLease({
+      leaseKey: this.#controlPlane.leaseKey ?? 'scheduler:dispatch',
+      ownerId: this.#controlPlane.executorId,
+      ttlMs: this.#controlPlane.leaseTtlMs ?? Math.max(this.#dispatchIntervalMs * 3, 3_000),
+    })
+
+    return lease !== null
   }
 
   async #handleDispatchFailure(job: JobRecord, error: unknown): Promise<void> {

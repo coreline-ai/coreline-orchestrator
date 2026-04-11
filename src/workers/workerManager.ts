@@ -1,12 +1,16 @@
-import { dirname, join } from 'node:path'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 
 import type { OrchestratorConfig } from '../config/config.js'
+import type { ControlPlaneCoordinator } from '../control/coordination.js'
 import { generateWorkerId } from '../core/ids.js'
 import {
   JobStatus,
+  SessionStatus,
   WorkerStatus,
   type JobRecord,
   type JobResultRecord,
+  type SessionRecord,
+  type SessionRuntimeIdentityRecord,
   type TerminalExecutionStatus,
   type WorkerRecord,
   type WorkerResultRecord,
@@ -15,24 +19,39 @@ import {
   assertValidJobTransition,
   assertValidWorkerTransition,
   isTerminalJobStatus,
+  isTerminalSessionStatus,
   isTerminalWorkerStatus,
 } from '../core/stateMachine.js'
 import {
   JobNotFoundError,
   OrchestratorError,
+  SessionTransportUnavailableError,
   WorkerNotFoundError,
 } from '../core/errors.js'
-import { EventBus } from '../core/eventBus.js'
+import type { EventPublisher } from '../core/eventBus.js'
 import { createEvent } from '../core/events.js'
 import { WorktreeManager } from '../isolation/worktreeManager.js'
 import { LogCollector } from '../logs/logCollector.js'
 import { ResultAggregator } from '../results/resultAggregator.js'
 import { ensureDir } from '../storage/safeWrite.js'
-import type { StateStore } from '../storage/types.js'
-import type { RuntimeAdapter, RuntimeExitResult, RuntimeHandle, WorkerRuntimeSpec } from '../runtime/types.js'
 import {
+  publishManifestedFile,
+} from '../storage/manifestTransport.js'
+import { safeWriteFile } from '../storage/safeWrite.js'
+import type { StateStore, UpdateSessionRuntimeInput } from '../storage/types.js'
+import type { RuntimeAdapter, RuntimeExitResult, RuntimeHandle, WorkerRuntimeSpec } from '../runtime/types.js'
+import type {
+  AttachSessionInput,
+  DetachSessionInput,
+  SessionInputPayload,
+  SessionOutputStreamRequest,
+  SessionManager,
+} from '../sessions/sessionManager.js'
+import {
+  canReattachPersistedRuntimeIdentity,
   classifyWorkerRecoveryDisposition,
   getPersistedRuntimeIdentity,
+  getPersistedRuntimeIdentityFromSession,
   isPersistedRuntimeIdentityLive,
   terminatePersistedRuntimeIdentity,
 } from '../runtime/recovery.js'
@@ -43,8 +62,18 @@ interface WorkerManagerDependencies {
   worktreeManager: WorktreeManager
   logCollector: LogCollector
   resultAggregator: ResultAggregator
-  eventBus: EventBus
+  eventBus: EventPublisher
   config: OrchestratorConfig
+  sessionManager?: SessionManager
+  controlPlane?: {
+    coordinator: Pick<
+      ControlPlaneCoordinator,
+      'upsertWorkerHeartbeat' | 'releaseWorkerHeartbeat' | 'getWorkerAssignment'
+    >
+    executorId: string
+    heartbeatIntervalMs?: number
+    heartbeatTtlMs?: number
+  }
 }
 
 export class WorkerManager {
@@ -53,13 +82,16 @@ export class WorkerManager {
   readonly #worktreeManager: WorktreeManager
   readonly #logCollector: LogCollector
   readonly #resultAggregator: ResultAggregator
-  readonly #eventBus: EventBus
+  readonly #eventBus: EventPublisher
   readonly #config: OrchestratorConfig
+  readonly #sessionManager?: SessionManager
+  readonly #controlPlane?: WorkerManagerDependencies['controlPlane']
   readonly #runtimeHandles = new Map<string, RuntimeHandle>()
   readonly #workerResults = new Map<string, WorkerResultRecord>()
   readonly #jobResults = new Map<string, JobResultRecord>()
   readonly #workerSettlements = new Map<string, Promise<void>>()
   readonly #jobAggregationTasks = new Map<string, Promise<void>>()
+  readonly #workerHeartbeatTimers = new Map<string, ReturnType<typeof setInterval>>()
 
   constructor(dependencies: WorkerManagerDependencies) {
     this.#stateStore = dependencies.stateStore
@@ -69,6 +101,8 @@ export class WorkerManager {
     this.#resultAggregator = dependencies.resultAggregator
     this.#eventBus = dependencies.eventBus
     this.#config = dependencies.config
+    this.#sessionManager = dependencies.sessionManager
+    this.#controlPlane = dependencies.controlPlane
   }
 
   async createWorker(jobRecord: JobRecord, prompt: string): Promise<WorkerRecord> {
@@ -200,7 +234,9 @@ export class WorkerManager {
       }
 
       await this.#stateStore.updateWorker(activeWorker)
+      await this.#syncSessionRuntimeOnWorkerStart(activeWorker, handle)
       currentJob = await this.#advanceJobToStatus(currentJob, JobStatus.Running)
+      await this.#startWorkerHeartbeat(activeWorker)
 
       this.#runtimeHandles.set(activeWorker.workerId, handle)
       const settlement = this.#registerWorkerSettlement(activeWorker, handle)
@@ -262,6 +298,18 @@ export class WorkerManager {
 
     const handle = this.#runtimeHandles.get(workerId)
     if (handle === undefined) {
+      if (updatedWorker.runtimeMode === 'session') {
+        try {
+          const reattachedHandle = await this.reattachWorkerRuntime(workerId)
+          if (reattachedHandle !== null) {
+            await this.#runtimeAdapter.stop(reattachedHandle)
+            return
+          }
+        } catch {
+          // Fall through to detached-runtime finalization.
+        }
+      }
+
       if (!isTerminalWorkerStatus(updatedWorker.status)) {
         const canceledWorker = await this.#stopWithoutRuntimeHandle(updatedWorker)
         await this.#queueJobAggregation(canceledWorker.jobId)
@@ -270,6 +318,222 @@ export class WorkerManager {
     }
 
     await this.#runtimeAdapter.stop(handle)
+  }
+
+  async attachSessionRuntime(
+    session: SessionRecord,
+    input: AttachSessionInput = {},
+  ): Promise<UpdateSessionRuntimeInput | null> {
+    if (session.mode !== 'session') {
+      return null
+    }
+
+    const worker = await this.#getRequiredWorker(session.workerId)
+    if (isTerminalWorkerStatus(worker.status)) {
+      return null
+    }
+
+    const handle = await this.#ensureSessionRuntimeHandle(worker, session)
+    if (handle === null) {
+      return null
+    }
+
+    if (this.#runtimeAdapter.attachSession === undefined) {
+      throw new SessionTransportUnavailableError(
+        session.sessionId,
+        'attach',
+        'runtime_adapter_missing_attach_session',
+      )
+    }
+
+    const attachResult = await this.#runtimeAdapter.attachSession(handle, {
+      sessionId: session.sessionId,
+      clientId: input.clientId,
+      mode: input.mode ?? session.attachMode,
+      cursor: session.transcriptCursor,
+    })
+
+    return this.#buildSessionRuntimeUpdate(session.mode, handle, attachResult)
+  }
+
+  async detachSessionRuntime(
+    session: SessionRecord,
+    input: DetachSessionInput = {},
+  ): Promise<UpdateSessionRuntimeInput | null> {
+    if (session.mode !== 'session') {
+      return null
+    }
+
+    const worker = await this.#getRequiredWorker(session.workerId)
+    if (isTerminalWorkerStatus(worker.status)) {
+      return null
+    }
+
+    const handle = await this.#ensureSessionRuntimeHandle(worker, session, {
+      reattachOptional: true,
+    })
+    if (handle === null) {
+      return null
+    }
+
+    if (this.#runtimeAdapter.detachSession === undefined) {
+      throw new SessionTransportUnavailableError(
+        session.sessionId,
+        'detach',
+        'runtime_adapter_missing_detach_session',
+      )
+    }
+
+    await this.#runtimeAdapter.detachSession(handle, {
+      sessionId: session.sessionId,
+      reason: input.reason,
+    })
+
+    return this.#buildSessionRuntimeUpdate(session.mode, handle)
+  }
+
+  async sendSessionInput(
+    session: SessionRecord,
+    input: SessionInputPayload,
+  ): Promise<UpdateSessionRuntimeInput | null> {
+    if (session.mode !== 'session') {
+      return null
+    }
+
+    const worker = await this.#getRequiredWorker(session.workerId)
+    if (isTerminalWorkerStatus(worker.status)) {
+      return null
+    }
+
+    const handle = await this.#ensureSessionRuntimeHandle(worker, session)
+    if (handle === null) {
+      return null
+    }
+
+    if (this.#runtimeAdapter.sendInput === undefined) {
+      throw new SessionTransportUnavailableError(
+        session.sessionId,
+        'send_input',
+        'runtime_adapter_missing_send_input',
+      )
+    }
+
+    const backpressure = await this.#runtimeAdapter.sendInput(handle, {
+      sessionId: session.sessionId,
+      data: input.data,
+      sequence: input.sequence,
+      timestamp: input.timestamp,
+    })
+
+    const runtimeUpdate = this.#buildSessionRuntimeUpdate(session.mode, handle)
+    if (runtimeUpdate === null) {
+      return null
+    }
+
+    return {
+      ...runtimeUpdate,
+      backpressure:
+        backpressure ?? runtimeUpdate.backpressure ?? session.backpressure,
+      updatedAt: input.timestamp ?? new Date().toISOString(),
+    }
+  }
+
+  async readSessionOutput(
+    session: SessionRecord,
+    request: SessionOutputStreamRequest,
+  ) {
+    if (session.mode !== 'session') {
+      return null
+    }
+
+    const worker = await this.#getRequiredWorker(session.workerId)
+    if (isTerminalWorkerStatus(worker.status)) {
+      return null
+    }
+
+    const handle = await this.#ensureSessionRuntimeHandle(worker, session)
+    if (handle === null) {
+      return null
+    }
+
+    if (this.#runtimeAdapter.readOutput === undefined) {
+      throw new SessionTransportUnavailableError(
+        session.sessionId,
+        'read_output',
+        'runtime_adapter_missing_read_output',
+      )
+    }
+
+    return await this.#runtimeAdapter.readOutput(handle, {
+      sessionId: session.sessionId,
+      afterSequence: request.afterSequence,
+      onOutput: request.onOutput,
+    })
+  }
+
+  async reattachWorkerRuntime(workerId: string): Promise<RuntimeHandle | null> {
+    const existingHandle = this.#runtimeHandles.get(workerId)
+    if (existingHandle !== undefined) {
+      return existingHandle
+    }
+
+    const worker = await this.#getRequiredWorker(workerId)
+    if (
+      worker.runtimeMode !== 'session' ||
+      isTerminalWorkerStatus(worker.status) ||
+      worker.sessionId === undefined ||
+      this.#runtimeAdapter.reattachSession === undefined
+    ) {
+      return null
+    }
+
+    const session = await this.#stateStore.getSession(worker.sessionId)
+    if (session === null || isTerminalSessionStatus(session.status)) {
+      return null
+    }
+
+    const runtimeIdentity = getPersistedRuntimeIdentityFromSession(session)
+    if (!canReattachPersistedRuntimeIdentity(runtimeIdentity)) {
+      return null
+    }
+
+    const handle = await this.#runtimeAdapter.reattachSession({
+      workerId: worker.workerId,
+      sessionId: session.sessionId,
+      attachMode: session.attachMode,
+      identity: runtimeIdentity,
+      cursor: session.transcriptCursor,
+    })
+
+    const reattachedWorker: WorkerRecord = {
+      ...worker,
+      pid: handle.pid ?? worker.pid,
+      startedAt: handle.startedAt ?? worker.startedAt,
+      updatedAt: new Date().toISOString(),
+    }
+
+    await this.#stateStore.updateWorker(reattachedWorker)
+    await this.#persistSessionRuntimeState(session, handle)
+    await this.#startWorkerHeartbeat(reattachedWorker)
+
+    this.#runtimeHandles.set(reattachedWorker.workerId, handle)
+    const settlement = this.#registerWorkerSettlement(reattachedWorker, handle)
+    this.#workerSettlements.set(reattachedWorker.workerId, settlement)
+
+    await this.#publishEvent(
+      'worker.runtime_reattached',
+      {
+        status: reattachedWorker.status,
+        pid: reattachedWorker.pid ?? null,
+        sessionId: session.sessionId,
+      },
+      {
+        jobId: reattachedWorker.jobId,
+        workerId: reattachedWorker.workerId,
+      },
+    )
+
+    return handle
   }
 
   getWorkerResult(workerId: string): WorkerResultRecord | null {
@@ -309,6 +573,7 @@ export class WorkerManager {
   ): Promise<void> {
     const currentWorker = await this.#stateStore.getWorker(workerId)
     if (currentWorker === null || isTerminalWorkerStatus(currentWorker.status)) {
+      await this.#stopWorkerHeartbeat(workerId, 'worker_terminal')
       this.#runtimeHandles.delete(workerId)
       return
     }
@@ -356,7 +621,7 @@ export class WorkerManager {
             finishingWorker.resultPath,
           )
 
-    const workerResult =
+    let workerResult =
       collectedResult ??
       this.#createFallbackWorkerResult(
         finishingWorker,
@@ -364,6 +629,46 @@ export class WorkerManager {
         exitResult,
         handle,
       )
+    if (finishingWorker.resultPath !== undefined && collectedResult === null) {
+      await safeWriteFile(
+        finishingWorker.resultPath,
+        `${JSON.stringify(workerResult, null, 2)}\n`,
+      )
+    }
+
+    let publishedResultPath = finishingWorker.resultPath
+    let publishedLogPath = finishingWorker.logPath
+    if (this.#config.artifactTransportMode === 'object_store_manifest') {
+      workerResult = {
+        ...workerResult,
+        artifacts: await this.#publishWorkerArtifacts(
+          finishingWorker,
+          workerResult.artifacts,
+          workerResult.finishedAt ?? new Date().toISOString(),
+        ),
+      }
+      if (finishingWorker.resultPath !== undefined) {
+        await safeWriteFile(
+          finishingWorker.resultPath,
+          `${JSON.stringify(workerResult, null, 2)}\n`,
+        )
+        publishedResultPath = await this.#publishManagedFile(
+          finishingWorker.repoPath,
+          finishingWorker.resultPath,
+          `worker_result:${finishingWorker.workerId}`,
+          'worker_result',
+          workerResult.finishedAt ?? new Date().toISOString(),
+        )
+      }
+
+      publishedLogPath = await this.#publishManagedFile(
+        finishingWorker.repoPath,
+        finishingWorker.logPath,
+        `worker_log:${finishingWorker.workerId}`,
+        'worker_log',
+        new Date().toISOString(),
+      )
+    }
 
     this.#workerResults.set(workerId, workerResult)
 
@@ -377,6 +682,8 @@ export class WorkerManager {
     const terminalWorker: WorkerRecord = {
       ...finishingWorker,
       status: terminalWorkerStatus,
+      logPath: publishedLogPath,
+      resultPath: publishedResultPath,
       finishedAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       metadata: {
@@ -388,7 +695,14 @@ export class WorkerManager {
     }
 
     await this.#stateStore.updateWorker(terminalWorker)
+    await this.#stopWorkerHeartbeat(workerId, 'worker_terminal')
     this.#runtimeHandles.delete(workerId)
+    if (this.#sessionManager !== undefined) {
+      await this.#sessionManager.closeSessionForWorker(
+        terminalWorker,
+        'worker_terminal',
+      )
+    }
 
     await this.#publishEvent(
       'worker.result',
@@ -425,6 +739,61 @@ export class WorkerManager {
     if (this.#jobAggregationTasks.get(jobId) === nextTask) {
       this.#jobAggregationTasks.delete(jobId)
     }
+  }
+
+  async #startWorkerHeartbeat(worker: WorkerRecord): Promise<void> {
+    if (this.#controlPlane === undefined) {
+      return
+    }
+
+    await this.#controlPlane.coordinator.upsertWorkerHeartbeat({
+      workerId: worker.workerId,
+      jobId: worker.jobId,
+      executorId: this.#controlPlane.executorId,
+      repoPath: worker.repoPath,
+      ttlMs: this.#controlPlane.heartbeatTtlMs ?? 5_000,
+      now: worker.updatedAt,
+      metadata: {
+        runtimeMode: worker.runtimeMode,
+      },
+    })
+
+    if (this.#workerHeartbeatTimers.has(worker.workerId)) {
+      return
+    }
+
+    const timer = setInterval(() => {
+      void this.#controlPlane?.coordinator.upsertWorkerHeartbeat({
+        workerId: worker.workerId,
+        jobId: worker.jobId,
+        executorId: this.#controlPlane.executorId,
+        repoPath: worker.repoPath,
+        ttlMs: this.#controlPlane.heartbeatTtlMs ?? 5_000,
+        metadata: {
+          runtimeMode: worker.runtimeMode,
+        },
+      })
+    }, this.#controlPlane.heartbeatIntervalMs ?? 1_000)
+
+    this.#workerHeartbeatTimers.set(worker.workerId, timer)
+  }
+
+  async #stopWorkerHeartbeat(workerId: string, reason: string): Promise<void> {
+    const timer = this.#workerHeartbeatTimers.get(workerId)
+    if (timer !== undefined) {
+      clearInterval(timer)
+      this.#workerHeartbeatTimers.delete(workerId)
+    }
+
+    if (this.#controlPlane === undefined) {
+      return
+    }
+
+    await this.#controlPlane.coordinator.releaseWorkerHeartbeat({
+      workerId,
+      executorId: this.#controlPlane.executorId,
+      reason,
+    })
   }
 
   async #aggregateJobIfReady(jobId: string): Promise<void> {
@@ -471,6 +840,25 @@ export class WorkerManager {
       workerResults,
     )
     this.#jobResults.set(jobId, aggregatedResult)
+    let publishedJobResultPath = aggregatingJob.resultPath
+    if (
+      this.#config.artifactTransportMode === 'object_store_manifest' &&
+      aggregatingJob.resultPath !== undefined
+    ) {
+      publishedJobResultPath = await this.#publishManagedFile(
+        aggregatingJob.repoPath,
+        aggregatingJob.resultPath,
+        `job_result:${aggregatingJob.jobId}`,
+        'job_result',
+        aggregatedResult.updatedAt,
+      )
+      const latestJob = await this.#getRequiredJob(aggregatingJob.jobId)
+      await this.#stateStore.updateJob({
+        ...latestJob,
+        resultPath: publishedJobResultPath,
+        updatedAt: new Date().toISOString(),
+      })
+    }
 
     if (currentJob.status === JobStatus.Canceled) {
       await this.#publishEvent(
@@ -486,6 +874,13 @@ export class WorkerManager {
       aggregatingJob,
       finalJobStatus,
     )
+    if (publishedJobResultPath !== finalizedJob.resultPath) {
+      await this.#stateStore.updateJob({
+        ...finalizedJob,
+        resultPath: publishedJobResultPath,
+        updatedAt: new Date().toISOString(),
+      })
+    }
 
     await this.#publishEvent(
       'job.result',
@@ -598,6 +993,13 @@ export class WorkerManager {
     }
 
     await this.#stateStore.updateWorker(failedWorker)
+    await this.#stopWorkerHeartbeat(failedWorker.workerId, 'worker_start_failed')
+    if (this.#sessionManager !== undefined) {
+      await this.#sessionManager.closeSessionForWorker(
+        failedWorker,
+        'worker_start_failed',
+      )
+    }
     this.#workerResults.set(
       failedWorker.workerId,
       this.#createFallbackWorkerResult(
@@ -633,6 +1035,15 @@ export class WorkerManager {
     }
 
     await this.#stateStore.updateWorker(terminalWorker)
+    await this.#stopWorkerHeartbeat(terminalWorker.workerId, 'worker_terminal')
+    if (this.#sessionManager !== undefined) {
+      await this.#sessionManager.closeSessionForWorker(
+        terminalWorker,
+        targetStatus === WorkerStatus.Canceled
+          ? 'worker_canceled_without_runtime'
+          : 'worker_lost_without_runtime',
+      )
+    }
     this.#workerResults.set(
       terminalWorker.workerId,
       this.#createFallbackWorkerResult(
@@ -651,13 +1062,79 @@ export class WorkerManager {
     return terminalWorker
   }
 
+  async #syncSessionRuntimeOnWorkerStart(
+    worker: WorkerRecord,
+    handle: RuntimeHandle,
+  ): Promise<void> {
+    if (worker.sessionId === undefined) {
+      return
+    }
+
+    const session = await this.#stateStore.getSession(worker.sessionId)
+    if (
+      session === null ||
+      session.mode !== 'session' ||
+      isTerminalSessionStatus(session.status)
+    ) {
+      return
+    }
+
+    if (session.attachedClients > 0) {
+      if (this.#runtimeAdapter.attachSession === undefined) {
+        throw new SessionTransportUnavailableError(
+          session.sessionId,
+          'attach',
+          'runtime_adapter_missing_attach_session',
+        )
+      }
+
+      const attachResult = await this.#runtimeAdapter.attachSession(handle, {
+        sessionId: session.sessionId,
+        mode: session.attachMode,
+        cursor: session.transcriptCursor,
+      })
+      const runtimeUpdates = this.#buildSessionRuntimeUpdate(
+        session.mode,
+        handle,
+        attachResult,
+      )
+      if (runtimeUpdates === null) {
+        return
+      }
+
+      const now = runtimeUpdates.updatedAt ?? new Date().toISOString()
+      await this.#stateStore.updateSession({
+        ...session,
+        status: SessionStatus.Active,
+        updatedAt: now,
+        lastAttachedAt: now,
+        runtimeIdentity:
+          runtimeUpdates.runtimeIdentity ?? session.runtimeIdentity,
+        transcriptCursor:
+          runtimeUpdates.transcriptCursor ?? session.transcriptCursor,
+        backpressure:
+          runtimeUpdates.backpressure ?? session.backpressure,
+      })
+      return
+    }
+
+    await this.#persistSessionRuntimeState(session, handle)
+  }
+
   async #stopWithoutRuntimeHandle(worker: WorkerRecord): Promise<WorkerRecord> {
-    const runtimeIdentity = getPersistedRuntimeIdentity(worker)
+    const session = await this.#getOpenSessionForWorker(worker)
+    const runtimeIdentity =
+      session === null
+        ? getPersistedRuntimeIdentity(worker)
+        : getPersistedRuntimeIdentityFromSession(session)
     const runtimeLive = isPersistedRuntimeIdentityLive(runtimeIdentity)
+    const sessionReattachable =
+      session !== null && canReattachPersistedRuntimeIdentity(runtimeIdentity)
     const recoveryDisposition = classifyWorkerRecoveryDisposition({
       worker,
       hasRuntimeHandle: false,
       isRuntimeLive: runtimeLive,
+      isSessionReattachable: sessionReattachable,
     })
 
     const recoveryMetadata = {
@@ -695,6 +1172,20 @@ export class WorkerManager {
       )
     }
 
+    if (recoveryDisposition === 'reattach_supported') {
+      return await this.#finalizeWithoutRuntime(
+        {
+          ...worker,
+          metadata: {
+            ...recoveryMetadata,
+            recoveryDisposition: 'finalize_lost',
+            recoveryReason: 'session_runtime_reattach_unavailable',
+          },
+        },
+        WorkerStatus.Lost,
+      )
+    }
+
     if (recoveryDisposition === 'finalize_canceled_created') {
       return await this.#finalizeWithoutRuntime(
         {
@@ -725,6 +1216,109 @@ export class WorkerManager {
     }
 
     return worker
+  }
+
+  async #ensureSessionRuntimeHandle(
+    worker: WorkerRecord,
+    session: SessionRecord,
+    options: { reattachOptional?: boolean } = {},
+  ): Promise<RuntimeHandle | null> {
+    const handle = this.#runtimeHandles.get(worker.workerId)
+    if (handle !== undefined) {
+      return handle
+    }
+
+    const runtimeIdentity = getPersistedRuntimeIdentityFromSession(session)
+    if (!canReattachPersistedRuntimeIdentity(runtimeIdentity)) {
+      return null
+    }
+
+    try {
+      return await this.reattachWorkerRuntime(worker.workerId)
+    } catch (error) {
+      if (options.reattachOptional === true) {
+        return null
+      }
+
+      throw error
+    }
+  }
+
+  async #getOpenSessionForWorker(
+    worker: Pick<WorkerRecord, 'sessionId'>,
+  ): Promise<SessionRecord | null> {
+    if (worker.sessionId === undefined) {
+      return null
+    }
+
+    const session = await this.#stateStore.getSession(worker.sessionId)
+    if (session === null || isTerminalSessionStatus(session.status)) {
+      return null
+    }
+
+    return session
+  }
+
+  async #persistSessionRuntimeState(
+    session: SessionRecord,
+    handle: RuntimeHandle,
+  ): Promise<void> {
+    const runtimeUpdate = this.#buildSessionRuntimeUpdate(session.mode, handle)
+    if (runtimeUpdate === null) {
+      return
+    }
+
+    await this.#stateStore.updateSessionRuntime(session.sessionId, runtimeUpdate)
+  }
+
+  #buildSessionRuntimeUpdate(
+    mode: SessionRecord['mode'],
+    handle: RuntimeHandle,
+    attachResult?: {
+      identity: {
+        transport?: SessionRuntimeIdentityRecord['transport']
+        transportRootPath?: string
+        runtimeSessionId?: string
+        runtimeInstanceId?: string
+        reattachToken?: string
+      }
+      transcriptCursor?: SessionRecord['transcriptCursor']
+      backpressure?: SessionRecord['backpressure']
+    },
+  ): UpdateSessionRuntimeInput | null {
+    if (mode !== 'session' || handle.sessionTransport === undefined) {
+      return null
+    }
+
+    return {
+      runtimeIdentity: {
+        mode,
+        transport:
+          attachResult?.identity.transport ??
+          handle.sessionTransport.spec.transport,
+        transportRootPath:
+          attachResult?.identity.transportRootPath ??
+          handle.sessionTransport.spec.rootDir,
+        runtimeSessionId:
+          attachResult?.identity.runtimeSessionId ??
+          handle.sessionTransport.spec.runtimeSessionId,
+        runtimeInstanceId:
+          attachResult?.identity.runtimeInstanceId ??
+          handle.sessionTransport.spec.runtimeInstanceId,
+        reattachToken:
+          attachResult?.identity.reattachToken ??
+          handle.sessionTransport.spec.reattachToken,
+        processPid: handle.pid,
+        startedAt: handle.startedAt,
+      },
+      transcriptCursor:
+        attachResult?.transcriptCursor ??
+        structuredClone(handle.sessionTransport.transcriptCursor),
+      backpressure:
+        attachResult?.backpressure ??
+        structuredClone(handle.sessionTransport.backpressure),
+      updatedAt: new Date().toISOString(),
+    }
   }
 
   async #removeWorktreeSafe(
@@ -852,6 +1446,71 @@ export class WorkerManager {
       'results',
       `${jobId}.json`,
     )
+  }
+
+  async #publishManagedFile(
+    repoPath: string,
+    sourcePath: string,
+    artifactId: string,
+    kind: string,
+    createdAt: string,
+  ): Promise<string> {
+    const manifest = await publishManifestedFile({
+      repoPath,
+      orchestratorRootDir: this.#config.orchestratorRootDir,
+      sourcePath,
+      artifactId,
+      kind,
+      createdAt,
+    })
+
+    return manifest.manifestPath
+  }
+
+  async #publishWorkerArtifacts(
+    worker: WorkerRecord,
+    artifacts: WorkerResultRecord['artifacts'],
+    createdAt: string,
+  ): Promise<WorkerResultRecord['artifacts']> {
+    return await Promise.all(
+      artifacts.map(async (artifact) => {
+        const sourcePath = this.#resolveArtifactSourcePath(worker.repoPath, artifact.path)
+        if (sourcePath === null) {
+          return artifact
+        }
+
+        try {
+          const manifest = await publishManifestedFile({
+            repoPath: worker.repoPath,
+            orchestratorRootDir: this.#config.orchestratorRootDir,
+            sourcePath,
+            artifactId: artifact.artifactId,
+            kind: artifact.kind,
+            createdAt,
+          })
+
+          return {
+            ...artifact,
+            path: manifest.publicPath,
+          }
+        } catch {
+          return artifact
+        }
+      }),
+    )
+  }
+
+  #resolveArtifactSourcePath(repoPath: string, artifactPath: string): string | null {
+    const candidate = isAbsolute(artifactPath)
+      ? resolve(artifactPath)
+      : resolve(repoPath, artifactPath)
+
+    const repoRoot = resolve(repoPath)
+    if (candidate !== repoRoot && !candidate.startsWith(`${repoRoot}/`)) {
+      return null
+    }
+
+    return candidate
   }
 }
 

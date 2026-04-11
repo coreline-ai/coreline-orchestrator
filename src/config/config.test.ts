@@ -10,6 +10,13 @@ describe('config', () => {
     expect(config.apiPort).toBe(3100)
     expect(config.apiExposure).toBe('trusted_local')
     expect(config.apiAuthToken).toBeUndefined()
+    expect(config.controlPlaneBackend).toBe('memory')
+    expect(config.dispatchQueueBackend).toBe('memory')
+    expect(config.eventStreamBackend).toBe('memory')
+    expect(config.stateStoreBackend).toBe('file')
+    expect(config.stateStoreImportFromFile).toBe(false)
+    expect(config.stateStoreSqlitePath).toBeUndefined()
+    expect(config.artifactTransportMode).toBe('shared_filesystem')
     expect(config.maxActiveWorkers).toBe(4)
     expect(config.maxWriteWorkersPerRepo).toBe(1)
     expect(config.allowedRepoRoots).toEqual([])
@@ -25,6 +32,17 @@ describe('config', () => {
       ORCH_PORT: '9999',
       ORCH_API_EXPOSURE: 'untrusted_network',
       ORCH_API_TOKEN: 'secret-token',
+      ORCH_API_TOKENS:
+        '[{"token_id":"ops-reader","token":"reader-token","subject":"ops-reader","actor_type":"operator","scopes":["jobs:read"],"repo_paths":["/repo/a"],"job_ids":["job_01"],"session_ids":["sess_01"]}]',
+      ORCH_CONTROL_BACKEND: 'sqlite',
+      ORCH_CONTROL_SQLITE_PATH: 'control-plane.sqlite',
+      ORCH_QUEUE_BACKEND: 'sqlite',
+      ORCH_QUEUE_SQLITE_PATH: 'dispatch-queue.sqlite',
+      ORCH_EVENT_STREAM_BACKEND: 'state_store_polling',
+      ORCH_STATE_BACKEND: 'sqlite',
+      ORCH_STATE_IMPORT_FROM_FILE: 'true',
+      ORCH_STATE_SQLITE_PATH: 'state-v2.sqlite',
+      ORCH_ARTIFACT_TRANSPORT: 'object_store_manifest',
       ORCH_MAX_WORKERS: '9',
       ORCH_MAX_WRITE_WORKERS_PER_REPO: '2',
       ORCH_ALLOWED_REPOS: '/repo/a, /repo/b',
@@ -38,6 +56,27 @@ describe('config', () => {
     expect(config.apiPort).toBe(9999)
     expect(config.apiExposure).toBe('untrusted_network')
     expect(config.apiAuthToken).toBe('secret-token')
+    expect(config.apiAuthTokens).toEqual([
+      {
+        tokenId: 'ops-reader',
+        token: 'reader-token',
+        subject: 'ops-reader',
+        actorType: 'operator',
+        scopes: ['jobs:read'],
+        repoPaths: ['/repo/a'],
+        jobIds: ['job_01'],
+        sessionIds: ['sess_01'],
+      },
+    ])
+    expect(config.controlPlaneBackend).toBe('sqlite')
+    expect(config.controlPlaneSqlitePath).toBe('control-plane.sqlite')
+    expect(config.dispatchQueueBackend).toBe('sqlite')
+    expect(config.dispatchQueueSqlitePath).toBe('dispatch-queue.sqlite')
+    expect(config.eventStreamBackend).toBe('state_store_polling')
+    expect(config.stateStoreBackend).toBe('sqlite')
+    expect(config.stateStoreImportFromFile).toBe(true)
+    expect(config.stateStoreSqlitePath).toBe('state-v2.sqlite')
+    expect(config.artifactTransportMode).toBe('object_store_manifest')
     expect(config.maxActiveWorkers).toBe(9)
     expect(config.maxWriteWorkersPerRepo).toBe(2)
     expect(config.allowedRepoRoots).toEqual(['/repo/a', '/repo/b'])
@@ -51,12 +90,24 @@ describe('config', () => {
     const config = loadConfig({
       ORCH_PORT: '0',
       ORCH_API_EXPOSURE: 'bogus',
+      ORCH_CONTROL_BACKEND: 'bogus',
+      ORCH_QUEUE_BACKEND: 'bogus',
+      ORCH_EVENT_STREAM_BACKEND: 'bogus',
+      ORCH_STATE_BACKEND: 'bogus',
+      ORCH_STATE_IMPORT_FROM_FILE: 'bogus',
+      ORCH_ARTIFACT_TRANSPORT: 'bogus',
       ORCH_MAX_WORKERS: '-1',
       ORCH_WORKER_MODE: 'bogus',
     })
 
     expect(config.apiPort).toBe(3100)
     expect(config.apiExposure).toBe('trusted_local')
+    expect(config.controlPlaneBackend).toBe('memory')
+    expect(config.dispatchQueueBackend).toBe('memory')
+    expect(config.eventStreamBackend).toBe('memory')
+    expect(config.stateStoreBackend).toBe('file')
+    expect(config.stateStoreImportFromFile).toBe(false)
+    expect(config.artifactTransportMode).toBe('shared_filesystem')
     expect(config.maxActiveWorkers).toBe(4)
     expect(config.workerMode).toBe('process')
   })
@@ -68,6 +119,26 @@ describe('config', () => {
           ORCH_API_EXPOSURE: 'untrusted_network',
         }),
       ),
-    ).toThrow('External API exposure requires ORCH_API_TOKEN.')
+    ).toThrow('External API exposure requires ORCH_API_TOKEN or ORCH_API_TOKENS.')
+  })
+
+  test('allows named auth tokens to satisfy external exposure requirements', () => {
+    expect(() =>
+      assertSafeApiConfig(
+        loadConfig({
+          ORCH_API_EXPOSURE: 'untrusted_network',
+          ORCH_API_TOKENS:
+            '[{"token_id":"svc","token":"svc-token","subject":"svc","scopes":["system:read"]}]',
+        }),
+      ),
+    ).not.toThrow()
+  })
+
+  test('rejects invalid ORCH_API_TOKENS json', () => {
+    expect(() =>
+      loadConfig({
+        ORCH_API_TOKENS: '{invalid-json}',
+      }),
+    ).toThrow('ORCH_API_TOKENS must be valid JSON.')
   })
 })

@@ -2,8 +2,10 @@ import { describe, expect, test } from 'bun:test'
 
 import {
   generateArtifactId,
+  generateExecutorId,
   generateEventId,
   generateJobId,
+  generateSessionId,
   generateWorkerId,
 } from './ids.js'
 
@@ -16,8 +18,10 @@ describe('ids', () => {
   test('generates prefixed ULIDs', () => {
     expectPrefixedUlid(generateJobId(), 'job')
     expectPrefixedUlid(generateWorkerId(), 'wrk')
+    expectPrefixedUlid(generateSessionId(), 'sess')
     expectPrefixedUlid(generateEventId(), 'evt')
     expectPrefixedUlid(generateArtifactId(), 'art')
+    expectPrefixedUlid(generateExecutorId(), 'exec')
   })
 
   test('generates unique values across calls', () => {
@@ -25,10 +29,12 @@ describe('ids', () => {
       generateJobId(),
       generateJobId(),
       generateWorkerId(),
+      generateSessionId(),
       generateEventId(),
       generateArtifactId(),
+      generateExecutorId(),
     ])
 
-    expect(ids.size).toBe(5)
+    expect(ids.size).toBe(7)
   })
 })

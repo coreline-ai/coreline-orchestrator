@@ -473,6 +473,7 @@ coreline-orchestrator/
 
 ### v2 — Future
 
+- 🔶 Phase 1 complete — contract freeze, migration guardrails, and session/WebSocket compatibility rules locked
 - 🔮 Session-aware worker adapter
 - 🔮 WebSocket event streaming
 - 🔮 SQLite state store
@@ -491,8 +492,10 @@ coreline-orchestrator/
 | [`docs/IMPLEMENTATION-PLAN.md`](docs/IMPLEMENTATION-PLAN.md) | 4-phase implementation strategy |
 | [`docs/API-DRAFT.md`](docs/API-DRAFT.md) | Full API contract with examples |
 | [`docs/OPERATIONS.md`](docs/OPERATIONS.md) | Operations runbook, smoke commands, and operator procedures |
+| [`docs/RELEASE-NOTES.md`](docs/RELEASE-NOTES.md) | Human-friendly release summary for the shipped baseline |
 | [`docs/OSS-COMPARISON.md`](docs/OSS-COMPARISON.md) | Build-vs-buy analysis (Temporal, LangGraph, etc.) |
 | [`docs/IMPL-DETAIL.md`](docs/IMPL-DETAIL.md) | Granular task breakdown with test cases |
+| [`CHANGELOG.md`](CHANGELOG.md) | Commit-oriented changelog |
 | [`dev-plan/implement_20260410_214510.md`](dev-plan/implement_20260410_214510.md) | Current phased execution roadmap |
 | [`dev-plan/implement_20260411_094401.md`](dev-plan/implement_20260411_094401.md) | Post-v1 P0 hardening patch plan & verification |
 | [`dev-plan/implement_20260411_104301.md`](dev-plan/implement_20260411_104301.md) | Post-P0 P1/P2 hardening backlog |

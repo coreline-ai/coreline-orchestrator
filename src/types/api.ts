@@ -12,6 +12,7 @@ import {
   type ArtifactRecord,
   type JobRecord,
   type JobResultRecord,
+  type SessionRecord,
   type WorkerRecord,
 } from '../core/models.js'
 import type { LogPage } from '../logs/logIndex.js'
@@ -51,6 +52,22 @@ export const restartWorkerRequestSchema = z.object({
   reuse_context: z.boolean().optional(),
 })
 
+export const createSessionRequestSchema = z.object({
+  job_id: z.string().trim().min(1).optional(),
+  worker_id: z.string().trim().min(1),
+  mode: z.enum(['background', 'session']).default('session'),
+  metadata: z.record(z.string(), metadataValueSchema).optional(),
+})
+
+export const attachSessionRequestSchema = z.object({
+  client_id: z.string().trim().min(1).optional(),
+  mode: z.enum(['observe', 'interactive']).default('interactive'),
+})
+
+export const detachSessionRequestSchema = z.object({
+  reason: z.string().trim().min(1).optional(),
+})
+
 export const listJobsQuerySchema = z.object({
   status: z.nativeEnum(JobStatus).optional(),
   limit: z.coerce.number().int().min(1).max(200).optional(),
@@ -73,6 +90,11 @@ export const eventStreamQuerySchema = z.object({
   event_type: z.string().trim().min(1).optional(),
 })
 
+export const sessionStreamQuerySchema = z.object({
+  cursor: z.coerce.number().int().min(0).default(0),
+  transport: z.enum(['sse', 'websocket']).default('sse'),
+})
+
 export interface ApiWorkerRestartResponse {
   previous_worker_id: string
   previous_worker_terminal_status: WorkerStatus
@@ -80,6 +102,11 @@ export interface ApiWorkerRestartResponse {
   retried_job_id: string
   new_worker_id: string | null
   status: JobStatus | WorkerStatus
+}
+
+export interface ApiSessionLifecycleResponse {
+  session_id: string
+  status: SessionRecord['status']
 }
 
 export interface ApiVisibilityOptions {
@@ -233,6 +260,45 @@ export function toApiWorkerRestartResponse(input: {
     retried_job_id: input.retriedJob.jobId,
     new_worker_id: input.newWorker?.workerId ?? null,
     status: input.newWorker?.status ?? input.retriedJob.status,
+  }
+}
+
+export function toApiSessionSummary(session: SessionRecord) {
+  return {
+    session_id: session.sessionId,
+    worker_id: session.workerId,
+    job_id: session.jobId ?? null,
+    mode: session.mode,
+    status: session.status,
+    attached_clients: session.attachedClients,
+    updated_at: session.updatedAt,
+  }
+}
+
+export function toApiSessionDetail(session: SessionRecord) {
+  return {
+    session_id: session.sessionId,
+    worker_id: session.workerId,
+    job_id: session.jobId ?? null,
+    mode: session.mode,
+    status: session.status,
+    attach_mode: session.attachMode,
+    attached_clients: session.attachedClients,
+    created_at: session.createdAt,
+    updated_at: session.updatedAt,
+    last_attached_at: session.lastAttachedAt ?? null,
+    last_detached_at: session.lastDetachedAt ?? null,
+    closed_at: session.closedAt ?? null,
+    metadata: session.metadata ?? {},
+  }
+}
+
+export function toApiSessionLifecycleResponse(
+  session: Pick<SessionRecord, 'sessionId' | 'status'>,
+): ApiSessionLifecycleResponse {
+  return {
+    session_id: session.sessionId,
+    status: session.status,
   }
 }
 

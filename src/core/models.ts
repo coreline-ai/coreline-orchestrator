@@ -33,6 +33,8 @@ export type ExecutionMode = 'process' | 'background' | 'session'
 export type IsolationMode = 'none' | 'same-dir' | 'worktree'
 export type WorkerCapabilityClass = 'read_only' | 'write_capable'
 export type JobPriority = 'low' | 'normal' | 'high'
+export type SessionExecutionMode = Exclude<ExecutionMode, 'process'>
+export type SessionAttachMode = 'observe' | 'interactive'
 export type TerminalExecutionStatus =
   | 'completed'
   | 'failed'
@@ -95,10 +97,14 @@ export interface SessionRecord {
   sessionId: string
   workerId: string
   jobId?: string
+  mode: SessionExecutionMode
   status: SessionStatus
+  attachMode: SessionAttachMode
   attachedClients: number
   createdAt: string
   updatedAt: string
+  lastAttachedAt?: string
+  lastDetachedAt?: string
   closedAt?: string
   metadata?: Record<string, string>
 }

@@ -56,6 +56,54 @@ export interface RuntimeHandle {
 
 export type RuntimeStatus = 'active' | 'missing'
 
+export type RuntimeReconnectPolicy =
+  | 'not_supported'
+  | 'reattach_same_session'
+  | 'terminate_and_reconcile'
+
+export interface RuntimeModeCapabilities {
+  mode: ExecutionMode
+  longLived: boolean
+  attachable: boolean
+  detachable: boolean
+  interactive: boolean
+  reconnectPolicy: RuntimeReconnectPolicy
+  preferredEventTransport: 'sse' | 'websocket'
+}
+
+export const runtimeModeCapabilities: Record<
+  ExecutionMode,
+  RuntimeModeCapabilities
+> = {
+  process: {
+    mode: 'process',
+    longLived: false,
+    attachable: false,
+    detachable: false,
+    interactive: false,
+    reconnectPolicy: 'terminate_and_reconcile',
+    preferredEventTransport: 'sse',
+  },
+  background: {
+    mode: 'background',
+    longLived: true,
+    attachable: false,
+    detachable: true,
+    interactive: false,
+    reconnectPolicy: 'terminate_and_reconcile',
+    preferredEventTransport: 'sse',
+  },
+  session: {
+    mode: 'session',
+    longLived: true,
+    attachable: true,
+    detachable: true,
+    interactive: true,
+    reconnectPolicy: 'reattach_same_session',
+    preferredEventTransport: 'websocket',
+  },
+}
+
 export interface RuntimeAdapter {
   start(spec: WorkerRuntimeSpec): Promise<RuntimeHandle>
   stop(handle: RuntimeHandle): Promise<void>

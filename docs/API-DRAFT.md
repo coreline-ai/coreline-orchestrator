@@ -552,6 +552,13 @@ Notes:
 
 Session APIs are future-facing but should be designed now to avoid breaking changes later.
 
+### Session lifecycle contract
+
+- `background` and `session` are the only valid session-capable runtime modes.
+- a session record must keep `mode`, `status`, `attach_mode`, `attached_clients`, and lifecycle timestamps.
+- `process` workers do not expose same-unit reattach; they continue to use retry/reconcile semantics from v1.
+- `session` mode is the only mode that should promise same-session reattach after orchestrator restart.
+
 ## 8.1 Create Session
 
 ### Request
@@ -561,7 +568,7 @@ Session APIs are future-facing but should be designed now to avoid breaking chan
 {
   "job_id": "job_01JABCXYZ",
   "worker_id": "worker_01JWORKER",
-  "mode": "background"
+  "mode": "session"
 }
 ```
 
@@ -587,9 +594,17 @@ Session APIs are future-facing but should be designed now to avoid breaking chan
 {
   "session_id": "session_01JSESSION",
   "worker_id": "worker_01JWORKER",
+  "job_id": "job_01JABCXYZ",
+  "mode": "session",
   "status": "active",
+  "attach_mode": "interactive",
   "attached_clients": 1,
-  "created_at": "2026-04-04T12:30:20Z"
+  "created_at": "2026-04-04T12:30:20Z",
+  "updated_at": "2026-04-04T12:31:10Z",
+  "last_attached_at": "2026-04-04T12:31:00Z",
+  "last_detached_at": null,
+  "closed_at": null,
+  "metadata": {}
 }
 ```
 
@@ -599,6 +614,13 @@ Session APIs are future-facing but should be designed now to avoid breaking chan
 
 ### Request
 `POST /api/v1/sessions/:sessionId/attach`
+
+```json
+{
+  "client_id": "cli_01",
+  "mode": "interactive"
+}
+```
 
 ### Response
 
@@ -611,7 +633,29 @@ Session APIs are future-facing but should be designed now to avoid breaking chan
 
 ---
 
-## 8.4 Cancel Session
+## 8.4 Detach Session
+
+### Request
+`POST /api/v1/sessions/:sessionId/detach`
+
+```json
+{
+  "reason": "Browser tab closed"
+}
+```
+
+### Response
+
+```json
+{
+  "session_id": "session_01JSESSION",
+  "status": "detached"
+}
+```
+
+---
+
+## 8.5 Cancel Session
 
 ### Request
 `POST /api/v1/sessions/:sessionId/cancel`
@@ -621,6 +665,26 @@ Session APIs are future-facing but should be designed now to avoid breaking chan
   "reason": "Session canceled by operator"
 }
 ```
+
+### Response
+
+```json
+{
+  "session_id": "session_01JSESSION",
+  "status": "closed"
+}
+```
+
+---
+
+## 8.6 Session streaming and WebSocket control
+
+- `GET /api/v1/sessions/:sessionId/stream` should remain SSE-compatible for passive observation.
+- `WS /api/v1/sessions/:sessionId/ws` should be the preferred interactive attach transport for v2.
+- browser-compatible auth should allow `?access_token=<token>` during WebSocket upgrade; non-browser clients may use `Authorization: Bearer <token>`.
+- the first WebSocket client message should declare subscribe scope and requested interaction mode.
+- reconnect should be resumable by session id; clients should treat the stream as eventually consistent and replay-safe.
+- if the server detects the client is too slow, it may close the WebSocket with a retryable backpressure signal and require replay from the last acknowledged cursor.
 
 ---
 
@@ -758,6 +822,7 @@ All non-2xx responses should return a structured error object.
   - SSE-compatible query token: `?access_token=<token>`
 - in `untrusted_network`, sensitive path fields are redacted to `null` and metadata objects are redacted to `{}`.
 - allowlist failures redact repo path details in external mode.
+- future WebSocket attach should reuse the same token contract: bearer header for programmatic clients, query token for browser/session flows.
 
 ## 12.2 Future direction
 - per-user access control,
@@ -821,10 +886,18 @@ Every streamed event should have a standard envelope.
 - process-based CodexCode worker execution.
 
 ### v2 implementation target
+- session-capable API contract frozen before implementation,
 - stronger session model,
+- SQLite-backed metadata store with import / rollback path,
 - richer worker restart/attach semantics,
-- optional WebSocket streaming,
+- optional WebSocket streaming and control,
 - pluggable artifact storage.
+
+### v2 compatibility guardrails
+- keep `/api/v1/jobs`, `/api/v1/workers`, `/api/v1/artifacts`, and SSE contracts backward-compatible.
+- add session and WebSocket APIs additively; do not silently repurpose process-mode endpoints.
+- keep `untrusted_network` token auth and redaction semantics identical across HTTP, SSE, and future WebSocket transports.
+- define file-store → SQLite migration and rollback before making SQLite the default backend.
 
 ---
 

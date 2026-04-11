@@ -241,8 +241,8 @@ post-v1 hardening 이력은 `dev-plan/implement_20260411_094401.md`를 참조한
 | Real Runtime Verification & Ops Readiness | 완료 |
 
 현재 다음 우선순위:
-- v2 planning 실행 (`dev-plan/implement_20260411_120538.md`)
-- session-aware runtime / SQLite / WebSocket 순의 staged implementation 착수
+- v2 Phase 2 실행 (`dev-plan/implement_20260411_120538.md`)
+- session-aware runtime foundation 착수
 
 릴리스 규칙:
 - dependency/devDependency는 exact version만 허용
@@ -264,8 +264,10 @@ post-v1 hardening 이력은 `dev-plan/implement_20260411_094401.md`를 참조한
 | [docs/IMPLEMENTATION-PLAN.md](docs/IMPLEMENTATION-PLAN.md) | 4단계 구현 계획 |
 | [docs/API-DRAFT.md](docs/API-DRAFT.md) | API 계약서 |
 | [docs/OPERATIONS.md](docs/OPERATIONS.md) | 운영 runbook / smoke 절차 |
+| [docs/RELEASE-NOTES.md](docs/RELEASE-NOTES.md) | 릴리스 노트 |
 | [docs/OSS-COMPARISON.md](docs/OSS-COMPARISON.md) | OSS 비교 분석 |
 | [docs/IMPL-DETAIL.md](docs/IMPL-DETAIL.md) | 상세 구현계획 (impl-plan 스킬) |
+| [CHANGELOG.md](CHANGELOG.md) | 커밋 단위 changelog |
 | [dev-plan/implement_20260410_214510.md](dev-plan/implement_20260410_214510.md) | v1 실행 로드맵 |
 | [dev-plan/implement_20260411_094401.md](dev-plan/implement_20260411_094401.md) | post-v1 P0 hardening 패치 계획/검증 |
 | [dev-plan/implement_20260411_104301.md](dev-plan/implement_20260411_104301.md) | post-P0 P1/P2 hardening backlog |

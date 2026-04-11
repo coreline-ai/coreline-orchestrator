@@ -132,6 +132,19 @@ Each worker is a CodexCode CLI process.
 
 The architecture must support all four conceptually, even if only the first is used initially.
 
+### Runtime capability matrix
+
+| Mode | Long-lived | Attachable | Reconnect policy | Preferred transport |
+|------|-----------:|-----------:|------------------|---------------------|
+| `process` | no | no | terminate and reconcile | SSE |
+| `background` | yes | limited / operator-managed | terminate and reconcile | SSE |
+| `session` | yes | yes | reattach same session | WebSocket |
+
+Guardrails:
+- v1 process mode must remain non-attachable.
+- background mode may share long-lived process semantics, but should not promise same-session interactive reattach.
+- session-aware mode is the only mode that should guarantee attach/detach and interactive continuation semantics across reconnects.
+
 ---
 
 ## 5.3 Layer 3: Local Decomposition Plane
@@ -273,6 +286,13 @@ Filesystem-backed JSON store or SQLite.
 
 ### recommended direction
 Start with SQLite or file-backed metadata under `.orchestrator/` and use a repository-local development mode first.
+
+### Migration guardrails
+
+- keep the storage interface stable enough that file-backed and SQLite-backed implementations can coexist.
+- define import, verification, and rollback procedures before switching the default backend.
+- startup should be able to read existing file-backed state and bootstrap a SQLite store without losing readability/debuggability.
+- artifact sandbox and auth/redaction rules must remain independent of the backend choice.
 
 ---
 

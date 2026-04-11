@@ -4,21 +4,34 @@
   "private": true,
   "type": "module",
   "packageManager": "bun@1.3.11",
+  "engines": {
+    "bun": "1.3.11"
+  },
   "main": "dist/index.js",
   "module": "dist/index.js",
   "scripts": {
-    "build": "bunx tsc -p tsconfig.json",
+    "clean": "rm -rf dist",
+    "build": "bun run clean && bunx tsc -p tsconfig.build.json",
+    "typecheck": "bunx tsc --noEmit",
     "dev": "bun --watch src/index.ts",
+    "check:release-hygiene": "bun ./scripts/check-release-hygiene.ts",
+    "install:locked": "bun install --frozen-lockfile",
+    "ops:smoke": "bun run ops:smoke:fixture",
+    "ops:smoke:fixture": "bun ./scripts/run-ops-smoke.ts success --worker-binary ./scripts/fixtures/smoke-success-worker.sh --mode fixture",
+    "ops:smoke:timeout:fixture": "bun ./scripts/run-ops-smoke.ts timeout --worker-binary ./scripts/fixtures/smoke-timeout-worker.sh --mode fixture",
+    "ops:smoke:real": "bun ./scripts/run-ops-smoke.ts success --worker-binary codexcode --mode real",
     "start": "bun dist/index.js",
-    "test": "bun test"
+    "test": "bun test",
+    "verify": "bun run check:release-hygiene && bun test && bun run typecheck && bun run build",
+    "release:check": "bun run check:release-hygiene && bun run install:locked && bun test && bun run typecheck && bun run build"
   },
   "dependencies": {
-    "hono": "latest",
-    "ulid": "latest",
-    "zod": "latest"
+    "hono": "4.12.10",
+    "ulid": "3.0.2",
+    "zod": "4.3.6"
   },
   "devDependencies": {
-    "@types/bun": "latest",
-    "typescript": "latest"
+    "@types/bun": "1.3.11",
+    "typescript": "6.0.2"
   }
 }

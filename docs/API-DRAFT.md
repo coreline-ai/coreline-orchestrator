@@ -28,7 +28,8 @@ This is not a direct mirror of internal CLI commands. It is a stable orchestrati
 This draft intentionally includes both required v1 endpoints and reserved future-facing routes.
 
 - **Required in v1**: jobs, workers, artifacts, health/capacity/metrics, and SSE event streams
-- **Reserved / future-facing**: sessions, worker reassign, admin reconcile/cleanup
+- **Shipped after v1**: sessions, session WebSocket transport, SQLite migration path
+- **Reserved / future-facing**: worker reassign, admin reconcile/cleanup
 
 ---
 
@@ -102,6 +103,7 @@ POST   /api/v1/jobs/:jobId/cancel
 POST   /api/v1/jobs/:jobId/retry
 GET    /api/v1/jobs/:jobId/results
 GET    /api/v1/jobs/:jobId/events
+WS     /api/v1/jobs/:jobId/ws
 GET    /api/v1/jobs/:jobId/artifacts
 ```
 
@@ -112,6 +114,7 @@ GET    /api/v1/workers
 GET    /api/v1/workers/:workerId
 GET    /api/v1/workers/:workerId/logs
 GET    /api/v1/workers/:workerId/events
+WS     /api/v1/workers/:workerId/ws
 POST   /api/v1/workers/:workerId/stop
 POST   /api/v1/workers/:workerId/restart
 POST   /api/v1/workers/:workerId/reassign   (future)
@@ -120,13 +123,13 @@ POST   /api/v1/workers/:workerId/reassign   (future)
 ## 5.3 Sessions
 
 ```text
-POST   /api/v1/sessions                 (future)
-GET    /api/v1/sessions/:sessionId      (future)
-POST   /api/v1/sessions/:sessionId/attach (future)
-POST   /api/v1/sessions/:sessionId/detach (future)
-POST   /api/v1/sessions/:sessionId/cancel (future)
-GET    /api/v1/sessions/:sessionId/stream (future)
-WS     /api/v1/sessions/:sessionId/ws     (future)
+POST   /api/v1/sessions
+GET    /api/v1/sessions/:sessionId
+POST   /api/v1/sessions/:sessionId/attach
+POST   /api/v1/sessions/:sessionId/detach
+POST   /api/v1/sessions/:sessionId/cancel
+GET    /api/v1/sessions/:sessionId/stream
+WS     /api/v1/sessions/:sessionId/ws
 ```
 
 ## 5.4 Artifacts
@@ -355,8 +358,8 @@ Behavior:
 `GET /api/v1/jobs/:jobId/events`
 
 Preferred transport:
-- SSE in v1 for simplicity.
-- WebSocket may be added later.
+- SSE remains the default passive transport.
+- WebSocket is now also implemented for job-scoped subscribe flows.
 
 Authentication note:
 - in `untrusted_network`, pass `Authorization: Bearer <token>` or `?access_token=<token>`.
@@ -550,7 +553,7 @@ Notes:
 
 ## 8. Session API
 
-Session APIs are future-facing but should be designed now to avoid breaking changes later.
+Session APIs are implemented and remain additive to the v1 process-mode contract.
 
 ### Session lifecycle contract
 
@@ -677,14 +680,102 @@ Session APIs are future-facing but should be designed now to avoid breaking chan
 
 ---
 
-## 8.6 Session streaming and WebSocket control
+## 8.6 Get Session Transcript
 
-- `GET /api/v1/sessions/:sessionId/stream` should remain SSE-compatible for passive observation.
-- `WS /api/v1/sessions/:sessionId/ws` should be the preferred interactive attach transport for v2.
-- browser-compatible auth should allow `?access_token=<token>` during WebSocket upgrade; non-browser clients may use `Authorization: Bearer <token>`.
-- the first WebSocket client message should declare subscribe scope and requested interaction mode.
-- reconnect should be resumable by session id; clients should treat the stream as eventually consistent and replay-safe.
-- if the server detects the client is too slow, it may close the WebSocket with a retryable backpressure signal and require replay from the last acknowledged cursor.
+### Request
+`GET /api/v1/sessions/:sessionId/transcript?after_sequence=0&limit=200`
+
+Optional query:
+- `after_sequence`
+- `after_output_sequence`
+- `limit`
+- `kind=attach|detach|cancel|input|output|ack`
+
+### Response
+
+```json
+{
+  "session_id": "session_01JSESSION",
+  "items": [
+    {
+      "session_id": "session_01JSESSION",
+      "sequence": 3,
+      "timestamp": "2026-04-11T00:00:12.000Z",
+      "kind": "output",
+      "stream": "session",
+      "data": "echo:hello",
+      "output_sequence": 7,
+      "acknowledged_sequence": null
+    }
+  ],
+  "next_after_sequence": 3
+}
+```
+
+Transcript contract:
+- append-only per session
+- sequence is persisted per-session order
+- output replay for reconnecting WebSocket clients is sourced from this transcript
+
+---
+
+## 8.7 Get Session Diagnostics
+
+### Request
+`GET /api/v1/sessions/:sessionId/diagnostics`
+
+### Response
+
+```json
+{
+  "session": {
+    "session_id": "session_01JSESSION",
+    "status": "active"
+  },
+  "transcript": {
+    "total_entries": 6,
+    "latest_sequence": 6,
+    "latest_output_sequence": 7,
+    "last_activity_at": "2026-04-11T00:00:12.000Z",
+    "last_input_at": "2026-04-11T00:00:11.000Z",
+    "last_output_at": "2026-04-11T00:00:12.000Z",
+    "last_acknowledged_sequence": 7
+  },
+  "health": {
+    "idle_ms": 1200,
+    "heartbeat_state": "active",
+    "stuck": false,
+    "reasons": []
+  }
+}
+```
+
+Diagnostics contract:
+- `heartbeat_state`: `active | idle | stale`
+- `stuck` is derived from retained backpressure / missing recent activity / detached-runtime hints
+- operator tooling should prefer this endpoint over raw transcript scanning for quick triage
+
+---
+
+## 8.8 Session streaming and WebSocket control
+
+- `GET /api/v1/sessions/:sessionId/stream` remains an SSE-compatible passive observation stream.
+- `WS /api/v1/sessions/:sessionId/ws` now implements interactive same-session transport for `session` mode workers.
+- browser-compatible auth allows `?access_token=<token>` during WebSocket upgrade; non-browser clients may use `Authorization: Bearer <token>`.
+- the first client message should be:
+  - `{"type":"subscribe","cursor":0,"history_limit":50,"mode":"interactive","client_id":"cli_01"}`
+- additional session messages:
+  - `{"type":"input","data":"hello","sequence":7}`
+  - `{"type":"ack","acknowledged_sequence":7}`
+  - `{"type":"resume","after_sequence":7}`
+  - `{"type":"detach","reason":"Browser tab closed"}`
+  - `{"type":"cancel","reason":"Operator cancel"}`
+  - `{"type":"ping"}`
+- server messages include `hello`, `subscribed`, `output`, `backpressure`, `ack`, `resume`, `event`, `session_control`, `ping`, `pong`, and `error`.
+- `subscribed.resume_after_sequence` exposes the latest persisted transcript cursor for reconnecting clients.
+- reconnect subscribe / `resume` first replays persisted transcript output entries and then switches back to live runtime output.
+- replayed output messages are marked with `replayed: true`.
+- `session` mode is the only mode that promises same-session reattach. `background` remains operator-managed and `process` keeps v1 retry/reconcile semantics.
 
 ---
 
@@ -813,21 +904,63 @@ All non-2xx responses should return a structured error object.
 
 ## 12. Authentication and Authorization
 
-## 12.1 v1 recommendation
+## 12.1 Current contract
 - `trusted_local` mode: no auth, intended for loopback/internal operator use.
-- `untrusted_network` mode: `ORCH_API_TOKEN` required.
+- `untrusted_network` mode: `ORCH_API_TOKEN` or `ORCH_API_TOKENS` required.
 - accepted credentials:
   - `Authorization: Bearer <token>`
   - `X-Orch-Api-Token: <token>`
   - SSE-compatible query token: `?access_token=<token>`
+- `ORCH_API_TOKENS` is a JSON array of named operator/service tokens:
+
+```json
+[
+  {
+    "token_id": "ops-admin",
+    "token": "secret",
+    "subject": "ops-admin",
+    "actor_type": "operator",
+    "scopes": ["jobs:read", "jobs:write", "audit:read"],
+    "repo_paths": ["/repo/a"],
+    "job_ids": ["job_01"],
+    "session_ids": ["sess_01"]
+  }
+]
+```
+
+- supported scope families:
+  - `system:read`
+  - `jobs:read`, `jobs:write`
+  - `workers:read`, `workers:write`
+  - `sessions:read`, `sessions:write`
+  - `events:read`
+  - `artifacts:read`
+  - `audit:read`
 - in `untrusted_network`, sensitive path fields are redacted to `null` and metadata objects are redacted to `{}`.
 - allowlist failures redact repo path details in external mode.
-- future WebSocket attach should reuse the same token contract: bearer header for programmatic clients, query token for browser/session flows.
+- bearer/query token contract is identical across HTTP, SSE, and WebSocket upgrade flows.
+- scope-denied responses use `AUTHORIZATION_SCOPE_DENIED` with HTTP 403.
 
-## 12.2 Future direction
+## 12.2 Audit trail
+
+- major control actions persist `audit` events:
+  - job create / cancel / retry
+  - worker stop / restart
+  - session create / attach / cancel
+- `GET /api/v1/audit` supports:
+  - `offset`
+  - `limit`
+  - `actor_id`
+  - `action`
+  - `resource_kind`
+  - `outcome`
+- audit responses include actor identity, required scope, resource identity, and redacted repo path when needed.
+
+## 12.3 Future direction
 - per-user access control,
-- per-repository authorization,
-- audit logs for job creation, cancellation, and artifact access.
+- richer scope/RBAC composition,
+- artifact read audit expansion,
+- signed or externally shipped audit sinks.
 
 ---
 
@@ -888,7 +1021,7 @@ Every streamed event should have a standard envelope.
 ### v2 implementation target
 - session-capable API contract frozen before implementation,
 - stronger session model,
-- SQLite-backed metadata store with import / rollback path,
+- optional SQLite-backed metadata store with file import path shipped,
 - richer worker restart/attach semantics,
 - optional WebSocket streaming and control,
 - pluggable artifact storage.
@@ -898,6 +1031,8 @@ Every streamed event should have a standard envelope.
 - add session and WebSocket APIs additively; do not silently repurpose process-mode endpoints.
 - keep `untrusted_network` token auth and redaction semantics identical across HTTP, SSE, and future WebSocket transports.
 - define file-store → SQLite migration and rollback before making SQLite the default backend.
+- current dry-run, cutover, and rollback rehearsal procedure is documented in `docs/MIGRATION-V2.md`.
+- current ship gate and compatibility matrix are documented in `docs/V2-READINESS.md`.
 
 ---
 

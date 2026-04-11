@@ -78,7 +78,7 @@ Coreline Orchestrator는 외부 앱(웹, 데스크톱, 자동화 시스템)이 *
 │  ┌────▼─────┐  ┌─────▼─────┐  ┌────────▼────────┐  │
 │  │  State   │  │  Event    │  │    Runtime       │  │
 │  │  Store   │  │  Bus      │  │    Adapter       │  │
-│  │  (File)  │  │  (SSE)    │  │    (Process)     │  │
+│  │(File/SQL)│  │(SSE + WS) │  │    (Process)     │  │
 │  └──────────┘  └───────────┘  └─────────────────┘  │
 └─────────────────────────┬───────────────────────────┘
                           │
@@ -106,10 +106,10 @@ Coreline Orchestrator는 외부 앱(웹, 데스크톱, 자동화 시스템)이 *
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
 | HTTP Framework | **Hono** | Bun 네이티브, 경량, SSE 내장 |
-| State Store | **File JSON/NDJSON** | 구현 속도 최우선, 디버깅 용이 |
+| State Store | **File JSON/NDJSON + SQLite** | File 기본, SQLite v2 옵션 (`ORCH_STATE_BACKEND`) |
 | Worker Execution | **`child_process.spawn`** | 가장 안정적인 v1 경로 |
 | ID Format | **Prefixed ULID** | 시간 정렬, 리소스 구분 (`job_`, `wrk_`) |
-| Event Delivery | **In-process EventBus + SSE** | 단일 호스트, 외부 MQ 불필요 |
+| Event Delivery | **EventBus + SSE + WebSocket** | 단일 호스트, SSE 단방향 + WS 양방향 제어 |
 | Isolation | **Git Worktree** | Write 작업 기본값, 충돌 방지 |
 | Validation | **Zod** | 타입 안전 API 검증 |
 
@@ -173,10 +173,14 @@ curl http://localhost:3100/api/v1/jobs/<job_id>/results
 | `ORCH_PORT` | `3100` | API server port |
 | `ORCH_API_EXPOSURE` | `trusted_local` | `trusted_local` or `untrusted_network` |
 | `ORCH_API_TOKEN` | — | Required when `ORCH_API_EXPOSURE=untrusted_network` |
+| `ORCH_API_TOKENS` | — | JSON array for named operator/service tokens with scopes |
 | `ORCH_MAX_WORKERS` | `4` | Maximum concurrent workers |
 | `ORCH_ALLOWED_REPOS` | — | Comma-separated allowed repo paths |
 | `ORCH_ROOT_DIR` | `.orchestrator` | Orchestrator state/log/result directory name |
 | `ORCH_WORKER_BINARY` | `codexcode` | Worker CLI binary path |
+| `ORCH_STATE_BACKEND` | `file` | State store backend (`file` or `sqlite`) |
+| `ORCH_STATE_SQLITE_PATH` | `state.sqlite` | SQLite DB path (relative to state root) |
+| `ORCH_STATE_IMPORT_FROM_FILE` | — | Import file state into empty SQLite on boot |
 
 ### API Authentication & Redaction
 
@@ -186,10 +190,13 @@ curl http://localhost:3100/api/v1/jobs/<job_id>/results
   - `Authorization: Bearer <token>`
   - `X-Orch-Api-Token: <token>`
   - SSE 호환 query token: `?access_token=<token>`
+- named token 예시:
+  - `ORCH_API_TOKENS='[{"token_id":"ops-admin","token":"secret","subject":"ops-admin","actor_type":"operator","scopes":["*"],"repo_paths":["/repo/a"]}]'`
 - `untrusted_network` 모드에서는 민감 경로/메타데이터가 redaction 됩니다:
   - repo / worktree / log / result / artifact path → `null`
   - metadata objects → `{}`
   - allowlist error의 repo path detail 제거
+- external exposure에서는 named token + scope + repo/job/session boundary가 적용되고, 주요 control action은 audit trail로 남습니다.
 
 ---
 
@@ -208,6 +215,7 @@ curl http://localhost:3100/api/v1/jobs/<job_id>/results
 | `POST` | `/jobs/:id/retry` | 🔄 Retry a failed job |
 | `GET` | `/jobs/:id/results` | 📊 Get aggregated results |
 | `GET` | `/jobs/:id/events` | 📡 SSE event stream |
+| `WS` | `/jobs/:id/ws` | ⚡ WebSocket event stream |
 
 ### Workers
 
@@ -219,6 +227,7 @@ curl http://localhost:3100/api/v1/jobs/<job_id>/results
 | `POST` | `/workers/:id/stop` | ⏹️ Stop a worker |
 | `POST` | `/workers/:id/restart` | 🔄 Restart a worker |
 | `GET` | `/workers/:id/events` | 📡 SSE event stream |
+| `WS` | `/workers/:id/ws` | ⚡ WebSocket event stream |
 
 > `POST /workers/:id/restart`는 process-mode에서 **같은 worker 실행을 재부착/재시작하는 API가 아니다**.  
 > terminal worker를 기준으로 **새 retry job/worker를 생성하는 `retry_job_clone` 동작**이다.
@@ -227,6 +236,29 @@ curl http://localhost:3100/api/v1/jobs/<job_id>/results
 > 오케스트레이터는 해당 PID를 terminate 시도 후 `lost`로 정리하고 job을 재큐잉한다.
 >
 > `ORCH_API_EXPOSURE=untrusted_network`일 때는 모든 `/api/v1/*` endpoint와 SSE stream이 API token을 요구하며, worker/job/artifact detail의 path/metadata 필드는 redaction 된다.
+
+### Sessions
+
+| Method | Endpoint | Description |
+|:------:|----------|-------------|
+| `POST` | `/sessions` | 🔌 Create a session record for a session/background worker |
+| `GET` | `/sessions/:id` | 🔍 Get session details |
+| `GET` | `/sessions/:id/transcript` | 🧾 Replay persisted session transcript entries |
+| `GET` | `/sessions/:id/diagnostics` | 🩺 Inspect operator-facing session diagnostics |
+| `POST` | `/sessions/:id/attach` | ➕ Attach a client to a session |
+| `POST` | `/sessions/:id/detach` | ➖ Detach a client from a session |
+| `POST` | `/sessions/:id/cancel` | ⛔ Close the session and stop the linked worker if needed |
+| `GET` | `/sessions/:id/stream` | 📡 SSE-compatible passive session stream |
+| `WS` | `/sessions/:id/ws` | ⚡ Session WebSocket subscribe/control transport |
+| `GET` | `/audit` | 🧾 Query persisted audit trail entries |
+
+> 현재 post-v2 Phase 4 기준으로:
+> - job / worker / session scope WebSocket event stream이 구현되었다.
+> - session WebSocket은 `subscribe`, `input`, `ack`, `resume`, `detach`, `cancel`, `ping` interactive message를 지원한다.
+> - `session` mode worker는 same-session reattach/runtime resume을 지원한다.
+> - `GET /sessions/:id/transcript`와 `GET /sessions/:id/diagnostics`로 transcript replay / heartbeat / backpressure 상태를 조회할 수 있다.
+> - local executor registration, scheduler dispatch lease, worker heartbeat assignment seam이 도입되어 future multi-host coordinator로 확장할 수 있다.
+> - `process` / `background` mode는 기존 retry/reconcile 계약을 유지한다.
 
 ### Artifacts & System
 
@@ -333,7 +365,32 @@ curl http://localhost:3100/api/v1/jobs/<job_id>/results
               └──────────┘
 ```
 
-> **Terminal states**: `completed`, `failed`, `canceled`, `timed_out` (Job) / `finished`, `failed`, `canceled`, `lost` (Worker)
+### Session Lifecycle
+
+```
+  ┌───────────────┐
+  │uninitialized  │
+  └──────┬────────┘
+    ┌────┼─────────┐
+    ▼    ▼         ▼
+┌────────┐ ┌────────┐ ┌──────┐
+│attached│ │detached│ │closed│
+└───┬────┘ └───┬────┘ └──────┘
+    ▼          ▼
+┌────────┐ ┌────────┐
+│ active │ │attached│
+└───┬────┘ └────────┘
+    ▼
+┌────────┐
+│detached│
+└───┬────┘
+    ▼
+┌──────┐
+│closed│
+└──────┘
+```
+
+> **Terminal states**: `completed`, `failed`, `canceled`, `timed_out` (Job) / `finished`, `failed`, `canceled`, `lost` (Worker) / `closed` (Session)
 
 ---
 
@@ -357,8 +414,12 @@ coreline-orchestrator/
 │   └── IMPL-DETAIL.md             #   Detailed implementation spec
 │
 ├── 📂 dev-plan/                    # Active development tracking
-│   ├── implement_20260410_214510.md
-│   └── implement_20260411_094401.md
+│   ├── implement_20260404_230535.md #   Initial scaffolding plan
+│   ├── implement_20260410_214510.md #   v1 execution roadmap
+│   ├── implement_20260411_094401.md #   Post-v1 P0 hardening
+│   ├── implement_20260411_104301.md #   Post-P0 P1/P2 backlog
+│   ├── implement_20260411_120538.md #   v2 staged upgrade plan
+│   └── implement_20260411_135150.md #   Post-v2 follow-up (current)
 │
 └── 📂 src/
     ├── index.ts                    # Bootstrap: start / stop orchestrator
@@ -372,11 +433,18 @@ coreline-orchestrator/
     │   └── eventBus.ts             #   Typed pub/sub event bus
     │
     ├── 📂 config/
-    │   └── config.ts               # OrchestratorConfig loading
+    │   ├── config.ts               # OrchestratorConfig loading
+    │   └── releaseHygiene.ts       # Release quality gate (exact pinning, lockfile)
+    │
+    ├── 📂 control/                 # Distributed-ready coordination seams
+    │   └── coordination.ts         #   Executor registry, leases, worker heartbeats
+    │   └── remotePlane.ts          #   Remote claim/heartbeat/result contract
     │
     ├── 📂 storage/                 # Persistence layer
     │   ├── types.ts                #   StateStore interface
+    │   ├── createStateStore.ts     #   Backend factory (file | sqlite)
     │   ├── fileStateStore.ts       #   File-backed implementation
+    │   ├── sqliteStateStore.ts     #   SQLite-backed implementation (v2)
     │   └── safeWrite.ts            #   Atomic write utility
     │
     ├── 📂 isolation/               # Execution isolation
@@ -387,7 +455,11 @@ coreline-orchestrator/
     │   ├── types.ts                #   RuntimeAdapter interface
     │   ├── recovery.ts             #   Recovery classification & detached PID control
     │   ├── invocationBuilder.ts    #   CLI command assembly
+    │   ├── sessionWorkerClientAdapter.ts # File transport session adapter
     │   └── processRuntimeAdapter.ts #  Process spawn/stop/status
+    │
+    ├── 📂 sessions/
+    │   └── sessionManager.ts       # Session lifecycle management (v2)
     │
     ├── 📂 workers/
     │   └── workerManager.ts        # Worker lifecycle orchestration
@@ -410,13 +482,20 @@ coreline-orchestrator/
     │   └── routes/
     │       ├── jobs.ts
     │       ├── workers.ts
+    │       ├── sessions.ts         #   Session lifecycle API (v2)
     │       ├── artifacts.ts
     │       ├── health.ts
-    │       └── events.ts           #   SSE streaming
+    │       ├── events.ts           #   SSE streaming
+    │       └── realtime.ts         #   WebSocket subscribe/control (v2)
     │
     ├── 📂 reconcile/               # Recovery & cleanup
     │   ├── reconciler.ts           #   Orphan worker detection
     │   └── cleanup.ts              #   Stale resource cleanup
+    │
+    ├── 📂 ops/                      # Operations tooling
+    │   ├── smoke.ts                #   E2E smoke scenarios (fixture/real)
+    │   ├── migration.ts            #   File→SQLite migration dry-run
+    │   └── multiHost.ts            #   Lease-based multi-host prototype
     │
     └── 📂 types/
         └── api.ts                  # API request/response DTOs
@@ -468,17 +547,40 @@ coreline-orchestrator/
 | Real runtime verification & ops readiness | 🟢 | CI-safe fixture smoke + manual `codexcode` smoke + operations runbook |
 
 남은 후속 과제:
-- session-aware runtime reattach
-- multi-tenant auth / RBAC / audit trail
+- richer RBAC / audit policy refinement
+- multi-host execution MVP
 
-### v2 — Future
+### v2 — Staged Upgrade
 
-- 🔶 Phase 1 complete — contract freeze, migration guardrails, and session/WebSocket compatibility rules locked
-- 🔮 Session-aware worker adapter
-- 🔮 WebSocket event streaming
-- 🔮 SQLite state store
-- 🔮 Multi-host distributed execution
-- 🔮 Authentication & RBAC
+- ✅ Phase 1 complete — contract freeze, migration guardrails, and session/WebSocket compatibility rules locked
+- ✅ Phase 2 complete — persisted session records, session lifecycle manager, startup/shutdown reconciliation, and `/api/v1/sessions/*` HTTP routes shipped
+- ✅ Phase 3 complete — optional SQLite `StateStore`, file→SQLite bootstrap import, backend selection config, and parity contract tests shipped
+- ✅ Phase 4 complete — job/worker/session WebSocket streaming, session live control, and auth-guarded WS upgrade paths shipped
+- ✅ Phase 5 complete — v2 session/SQLite/WebSocket E2E, migration dry-run + rollback rehearsal, and ship/readiness docs shipped
+
+### Post-v2 — Next Priorities ([dev-plan](dev-plan/implement_20260411_135150.md))
+
+- ✅ Phase 1: True Session Runtime & Reattach (interactive continuation)
+- ✅ Phase 2: Interactive Transport, Transcript, Operator Diagnostics
+- ✅ Phase 3: AuthN/AuthZ/Audit Hardening
+- ✅ Phase 4: Distributed-ready Control Plane Seams
+- ✅ Phase 5: Multi-host Execution MVP Plan or Prototype
+
+### Distributed Control Plane Follow-up ([dev-plan](dev-plan/implement_20260411_210712.md))
+
+- ✅ Phase 1: External Coordinator & Fencing Contract Freeze
+- ✅ Phase 2: Shared Queue / Shared Event Stream Backbone
+- ✅ Phase 3: Remote Artifact / Log / Transcript Transport
+- ✅ Phase 4: Remote Executor Worker-plane Integration
+- ✅ Phase 5: Cutover / Rollback / Failover Ops Hardening
+
+현재 distributed prototype 결론:
+- scheduler 전략은 **lease-based single leader**
+- multi-host prototype은 **shared SQLite coordinator + shared SQLite dispatch queue + state-store polling event replay** 조합으로 검증됨
+- artifact/log/result transport는 `object_store_manifest` projection으로 remote-friendly path를 제공함
+- remote worker plane 최소 계약은 `src/control/remotePlane.ts`에 고정되어 있고 dispatch/assignment fencing token을 포함함
+- `stopRuntime()`은 **local executor drain**만 수행하고, `stopOrchestrator()`만 singleton global shutdown semantics를 유지함
+- shared filesystem은 현재도 manifest blob backing store로 사용되며, true network object store cutover는 다음 로드맵 범위다
 
 ---
 
@@ -492,6 +594,8 @@ coreline-orchestrator/
 | [`docs/IMPLEMENTATION-PLAN.md`](docs/IMPLEMENTATION-PLAN.md) | 4-phase implementation strategy |
 | [`docs/API-DRAFT.md`](docs/API-DRAFT.md) | Full API contract with examples |
 | [`docs/OPERATIONS.md`](docs/OPERATIONS.md) | Operations runbook, smoke commands, and operator procedures |
+| [`docs/MIGRATION-V2.md`](docs/MIGRATION-V2.md) | File→SQLite dry-run, cutover, and rollback procedure |
+| [`docs/V2-READINESS.md`](docs/V2-READINESS.md) | v2 compatibility matrix, release checklist, and ship gates |
 | [`docs/RELEASE-NOTES.md`](docs/RELEASE-NOTES.md) | Human-friendly release summary for the shipped baseline |
 | [`docs/OSS-COMPARISON.md`](docs/OSS-COMPARISON.md) | Build-vs-buy analysis (Temporal, LangGraph, etc.) |
 | [`docs/IMPL-DETAIL.md`](docs/IMPL-DETAIL.md) | Granular task breakdown with test cases |
@@ -500,6 +604,8 @@ coreline-orchestrator/
 | [`dev-plan/implement_20260411_094401.md`](dev-plan/implement_20260411_094401.md) | Post-v1 P0 hardening patch plan & verification |
 | [`dev-plan/implement_20260411_104301.md`](dev-plan/implement_20260411_104301.md) | Post-P0 P1/P2 hardening backlog |
 | [`dev-plan/implement_20260411_120538.md`](dev-plan/implement_20260411_120538.md) | v2 staged upgrade plan (session runtime / SQLite / WebSocket) |
+| [`dev-plan/implement_20260411_135150.md`](dev-plan/implement_20260411_135150.md) | Post-v2 follow-up plan (session reattach / auth / distributed) |
+| [`dev-plan/implement_20260411_210712.md`](dev-plan/implement_20260411_210712.md) | Distributed control-plane follow-up plan (coordinator / queue / transport / failover) |
 | [`CLAUDE.md`](CLAUDE.md) | AI agent project context |
 
 ---
@@ -521,6 +627,14 @@ bun run check:release-hygiene  # Check exact pinning + lockfile/script drift
 bun run ops:smoke:fixture  # CI-safe success smoke with fixture worker
 bun run ops:smoke:timeout:fixture  # CI-safe timeout smoke with fixture worker
 bun run ops:smoke:real  # Manual real-worker smoke using codexcode
+bun run ops:smoke:v2:session:fixture  # Session + SQLite + WebSocket fixture smoke
+bun run ops:smoke:session:reattach:fixture  # Same-session reconnect/resume smoke
+bun run ops:migrate:dry-run  # File→SQLite dry-run and rollback rehearsal
+bun run ops:smoke:multihost:prototype  # Shared SQLite + lease-based multi-host simulation
+bun run ops:verify:v2  # v2 smoke + migration verification bundle
+bun run ops:verify:distributed  # Distributed prototype failover verification bundle
+bun run release:v2:check  # Full release gate plus v2 ops verification
+bun run release:distributed:check  # v2 gate + distributed prototype verification
 bun run verify       # Tests + typecheck + build + release hygiene checks
 bun run release:check  # Frozen-lockfile install + full release verification
 ```
@@ -532,14 +646,41 @@ bun run release:check  # Frozen-lockfile install + full release verification
 - release 전 표준 검증 명령은 `bun run release:check`입니다.
 - 명령/검증 절차 변경 시 `README.md`, `CLAUDE.md`, `AGENTS.md`, `dev-plan/*`를 같이 갱신합니다.
 
+### State Store Backend
+
+- `ORCH_STATE_BACKEND=file|sqlite`
+- `ORCH_STATE_IMPORT_FROM_FILE=true` 이면 **빈 SQLite DB** 시작 시 기존 file-backed state를 bootstrap import 합니다.
+- `ORCH_STATE_SQLITE_PATH`를 지정하지 않으면 state root 아래 기본값 `state.sqlite`를 사용합니다.
+- 현재 기본 backend는 `file`이며, SQLite는 additive v2 backend로 제공됩니다.
+
+### Distributed Prototype Backends
+
+- `ORCH_CONTROL_BACKEND=memory|sqlite`
+- `ORCH_CONTROL_SQLITE_PATH`로 shared coordinator DB 경로를 지정할 수 있습니다.
+- `ORCH_QUEUE_BACKEND=memory|sqlite`
+- `ORCH_QUEUE_SQLITE_PATH`로 shared dispatch queue DB 경로를 지정할 수 있습니다.
+- `ORCH_EVENT_STREAM_BACKEND=memory|state_store_polling`
+- `ORCH_ARTIFACT_TRANSPORT=shared_filesystem|object_store_manifest`
+- 현재 distributed prototype 권장 조합은:
+  - control plane: `sqlite`
+  - queue: `sqlite`
+  - event stream: `state_store_polling`
+  - artifact transport: `object_store_manifest`
+
 ### Operations Smoke
 
 - CI-safe smoke:
   - `bun run ops:smoke:fixture`
   - `bun run ops:smoke:timeout:fixture`
+  - `bun run ops:smoke:v2:session:fixture`
+- migration rehearsal:
+  - `bun run ops:migrate:dry-run`
+- distributed prototype verification:
+  - `bun run ops:smoke:multihost:prototype`
+  - `bun run ops:verify:distributed`
 - manual real-worker smoke:
   - `bun run ops:smoke:real`
-- 상세 운영 절차와 curl 예시는 [`docs/OPERATIONS.md`](docs/OPERATIONS.md)를 참고합니다.
+- 상세 운영 절차는 [`docs/OPERATIONS.md`](docs/OPERATIONS.md), cutover/rollback 절차는 [`docs/MIGRATION-V2.md`](docs/MIGRATION-V2.md), ship 기준은 [`docs/V2-READINESS.md`](docs/V2-READINESS.md)를 참고합니다.
 
 ### Code Conventions
 

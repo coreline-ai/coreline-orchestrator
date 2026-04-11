@@ -2,17 +2,22 @@
 
 ## Project Structure & Module Organization
 
-This repository has completed the v1 implementation and the post-v1 P0 hardening pass. Use `docs/` plus the current `dev-plan/` files as the source of truth:
+This repository has completed the v1 implementation, post-v1 P0 hardening, and v2 staged upgrade (Phase 1~5). Use `docs/` plus the current `dev-plan/` files as the source of truth:
 
 - `PRD.md`, `TRD.md`, `ARCHITECTURE.md`: product, technical, and architecture decisions
 - `IMPLEMENTATION-PLAN.md`, `IMPL-DETAIL.md`: phased build plan and task-level detail
-- `API-DRAFT.md`: HTTP/SSE contract
+- `API-DRAFT.md`: HTTP/SSE/WebSocket contract
+- `OPERATIONS.md`: smoke tests, diagnostics, operator procedures
+- `MIGRATION-V2.md`: file→SQLite cutover/rollback procedure
+- `V2-READINESS.md`: v2 compatibility matrix and release gates
 - `OSS-COMPARISON.md`: build-vs-buy guidance
 - `dev-plan/implement_20260410_214510.md`: v1 execution roadmap
 - `dev-plan/implement_20260411_094401.md`: post-v1 P0 hardening plan
 - `dev-plan/implement_20260411_104301.md`: post-P0 P1/P2 hardening backlog
+- `dev-plan/implement_20260411_120538.md`: v2 staged upgrade plan
+- `dev-plan/implement_20260411_135150.md`: post-v2 follow-up plan (current)
 
-Code lives under `src/`. Core domain, config/storage/isolation, runtime/logs, worker lifecycle, scheduler, API/SSE, and reconcile/shutdown modules are now implemented. Treat `dist/` as generated output. The first worker-client implementation is CodexCode CLI via the `codexcode` binary.
+Code lives under `src/`. Core domain, config/storage/isolation, runtime/logs, worker lifecycle, sessions, scheduler, API/SSE/WebSocket, ops (smoke/migration), and reconcile/shutdown modules are implemented. Treat `dist/` as generated output. The first worker-client implementation is CodexCode CLI via the `codexcode` binary.
 
 Post-P0 Phase 1 hardening established these runtime rules:
 - process-mode startup recovery does not reattach detached live workers
@@ -45,17 +50,20 @@ Keep `AGENTS.md`, `package.json`, and the planning docs aligned when commands ch
 - Structure: small modules, clear boundaries, no orchestration logic inside route handlers
 - Naming: `camelCase` for functions/variables, `PascalCase` for classes/types, `SCREAMING_SNAKE_CASE` for stable error codes
 
-ID prefixes should stay consistent with the design docs: `job_`, `wrk_`, `evt_`, `art_`.
+ID prefixes should stay consistent with the design docs: `job_`, `wrk_`, `evt_`, `art_`, `sess_`.
 
 ## Testing Guidelines
 
 Use `bun:test` for unit, integration, and lifecycle tests. Prefer `*.test.ts` next to the module under test. Cover:
 
-- state transitions
-- file-backed persistence and atomic writes
+- state transitions (job, worker, session)
+- file-backed and SQLite persistence, atomic writes, backend parity (contract tests)
 - worktree lifecycle and cleanup safety
 - runtime timeout/stop behavior
-- API validation, logs, and SSE flows
+- API validation, logs, SSE, and WebSocket flows
+- session lifecycle (attach/detach/cancel/reconcile)
+- E2E smoke scenarios (fixture success, timeout, session+SQLite+WebSocket)
+- migration dry-run and rollback rehearsal
 
 ## Commit & Pull Request Guidelines
 
@@ -72,7 +80,7 @@ Restrict repositories through an allowlist, prefer worktrees for write tasks, an
 
 ## Current Status & Handoff
 
-As of **2026-04-11**, the full v1 roadmap including Reconciliation & Shutdown is complete, the post-v1 P0 hardening patch set is complete, the full post-P0 P1/P2 hardening backlog through Phase 5 is complete, and v2 Phase 1 contract freeze/migration guardrails are now locked. The authoritative plans are `dev-plan/implement_20260410_214510.md`, `dev-plan/implement_20260411_104301.md`, and `dev-plan/implement_20260411_120538.md`.
+As of **2026-04-11**, the full v1 roadmap including Reconciliation & Shutdown is complete, the post-v1 P0 hardening patch set is complete, the full post-P0 P1/P2 hardening backlog through Phase 5 is complete, v2 Phase 1~5 are complete, the post-v2 follow-up in `dev-plan/implement_20260411_135150.md` is complete through Phase 5, and the distributed control-plane follow-up in `dev-plan/implement_20260411_210712.md` is complete through Phase 5.
 
 Baseline confirmed:
 
@@ -86,5 +94,19 @@ Baseline confirmed:
 - P1/P2 backlog Phase 4 complete: API token auth, SSE token access, and external redaction policy
 - P1/P2 backlog Phase 5 complete: CI-safe fixture smoke, manual real-worker smoke success, and `docs/OPERATIONS.md` runbook
 - v2 Phase 1 complete: session API/type contract freeze, runtime capability matrix, WebSocket/auth guardrails, and storage migration rules documented
+- v2 Phase 2 complete: persisted `SessionRecord` storage/indexes, `SessionManager`, `/api/v1/sessions/*` lifecycle routes, and startup/shutdown/reconcile session closure paths
+- v2 Phase 3 complete: optional `SqliteStateStore`, file→SQLite bootstrap import on empty DB, `ORCH_STATE_BACKEND` config, and backend parity contract tests
+- v2 Phase 4 complete: WebSocket subscribe protocol for job/worker/session scopes, session WS detach/cancel control, session SSE stream, and auth-guarded WS upgrade tests
+- v2 Phase 5 complete: session/SQLite/WebSocket fixture E2E, file→SQLite migration dry-run + rollback rehearsal, real process-mode smoke verification, and ship/readiness docs
+- post-v2 Phase 1 complete: true session runtime + reattach, `SessionWorkerClientAdapter`, WS input/ack/resume flow, same-session reconnect smoke, and sqlite reattach-metadata parity checks
+- post-v2 Phase 2 complete: persisted session transcript storage on file/sqlite backends, `/api/v1/sessions/:id/transcript|diagnostics`, transcript-based WS replay/resume semantics, operator heartbeat/backpressure diagnostics, and smoke/migration regression coverage
+- post-v2 Phase 3 complete: named operator/service token auth, repo/job/session scoped authorization, `/api/v1/audit`, audit trail for major control actions, and named-token SSE/WS auth regression coverage
+- post-v2 Phase 4 complete: distributed-ready seams via `DispatchQueue`/`EventPublisher`, `InMemoryControlPlaneCoordinator`, local executor registration/heartbeat, scheduler lease, worker heartbeat assignments, and heartbeat-aware reconcile suppression
+- post-v2 Phase 5 complete: lease-based single-leader multi-host prototype using shared SQLite + shared filesystem simulation, detached `createOrchestratorRuntime` / `stopRuntime` helpers, `src/control/remotePlane.ts` minimal remote worker-plane contract, and `bun run ops:smoke:multihost:prototype` verification
+- distributed follow-up Phase 1 complete: stable coordinator snapshot/fencing contract, monotonic token helpers, `SqliteControlPlaneCoordinator`, and coordinator factory wiring
+- distributed follow-up Phase 2 complete: `SqliteDispatchQueue`, `PollingStateStoreEventStream`, and replay-safe live subscription offsets for SSE/WS
+- distributed follow-up Phase 3 complete: manifest-backed artifact/log/result transport with manifest-aware readers and sandbox-preserving artifact API resolution
+- distributed follow-up Phase 4 complete: remote worker-plane fencing metadata, shared sqlite coordinator/queue runtime wiring, and executor-local drain semantics in `stopRuntime()`
+- distributed follow-up Phase 5 complete: `ops:verify:distributed`, `release:distributed:check`, failover smoke verification, and distributed ops/doc sync
 
-Immediate next step is **v2 Phase 2 session runtime foundation**. Start from `dev-plan/implement_20260411_120538.md`, then keep `docs/API-DRAFT.md`, `docs/ARCHITECTURE.md`, and `docs/OPERATIONS.md` aligned as v2 work lands. Keep all new work consistent with the locked decisions in `PRD.md`, `TRD.md`, and `API-DRAFT.md`: `src/` layout, multi-worker fan-out, worker-authored result JSON via `resultPath`, terminal state finalized in the exit callback, process-mode startup recovery terminates detached live PIDs instead of reattaching, artifact APIs stay sandboxed to repo-relative/orchestrator-managed paths, read-heavy state queries continue to use the new index/cache path instead of reintroducing directory-wide scans, dependency/version changes must preserve exact pinning plus frozen-lockfile verification, `untrusted_network` exposure must keep API token auth plus path/metadata redaction intact, and session/SQLite/WebSocket changes must remain additive to the v1 process-mode contract until cutover is explicitly planned.
+The current distributed control-plane roadmap in `dev-plan/implement_20260411_210712.md` is complete through Phase 5. Immediate next step is a new roadmap for a production-grade external coordinator service, broker-backed durable queue/event stream, and true network object-store cutover beyond the current sqlite/polling/manifest prototype. Keep `docs/API-DRAFT.md`, `docs/ARCHITECTURE.md`, `docs/OPERATIONS.md`, `docs/MIGRATION-V2.md`, and `docs/V2-READINESS.md` aligned as future control-plane work lands. Keep all new work consistent with the locked decisions in `PRD.md`, `TRD.md`, and `API-DRAFT.md`: `src/` layout, multi-worker fan-out, worker-authored result JSON via `resultPath`, terminal state finalized in the exit callback, process-mode startup recovery terminates detached live PIDs instead of reattaching, artifact APIs stay sandboxed to repo-relative/orchestrator-managed paths, read-heavy state queries continue to use the new index/cache path instead of reintroducing directory-wide scans, dependency/version changes must preserve exact pinning plus frozen-lockfile verification, `untrusted_network` exposure must keep named/shared token auth plus path/metadata redaction intact, session/SQLite/WebSocket changes must remain additive to the v1 process-mode contract until an explicit cutover plan supersedes it, and distributed prototype work must preserve executor-local drain semantics plus fencing-token monotonicity.

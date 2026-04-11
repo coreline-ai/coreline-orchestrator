@@ -263,6 +263,9 @@ cleanup(handle) -> cleanupResult
 ### v1 recommendation
 Implement `CodexCodeWorkerClientAdapter` first using process-based execution.
 
+### Current session-runtime foundation
+The codebase now includes persisted `SessionRecord` state, HTTP lifecycle routes (`create/get/attach/detach/cancel/transcript/diagnostics`), session/job/worker WebSocket transport, a file-based `SessionWorkerClientAdapter`, same-session runtime identity persistence, transcript persistence on both file/sqlite backends, transcript-based replay/resume semantics, operator heartbeat/backpressure diagnostics, startup/runtime reattach flows behind `SessionManager` + `WorkerManager`, and a distributed-ready local coordinator seam for executor registration / scheduler lease / worker heartbeat ownership.
+
 ### Architectural rule
 The orchestrator must be designed around pluggable worker clients. CodexCode CLI is the first supported worker client, not the identity of the whole framework.
 
@@ -287,10 +290,17 @@ Filesystem-backed JSON store or SQLite.
 ### recommended direction
 Start with SQLite or file-backed metadata under `.orchestrator/` and use a repository-local development mode first.
 
+### current implementation status
+- file-backed `FileStateStore` remains the default backend.
+- optional `SqliteStateStore` now ships behind config-based backend selection.
+- empty SQLite stores may bootstrap from existing file-backed state during startup.
+- scripted dry-run / cutover / rollback rehearsal now ships in `docs/MIGRATION-V2.md` and `src/ops/migration.ts`.
+
 ### Migration guardrails
 
 - keep the storage interface stable enough that file-backed and SQLite-backed implementations can coexist.
 - define import, verification, and rollback procedures before switching the default backend.
+- keep a rehearsed file-backend rollback path until SQLite becomes the explicit default.
 - startup should be able to read existing file-backed state and bootstrap a SQLite store without losing readability/debuggability.
 - artifact sandbox and auth/redaction rules must remain independent of the backend choice.
 
@@ -353,8 +363,11 @@ Provide real-time event fan-out to UI and API consumers.
 ### Recommended v1 transport
 - SSE for job and worker event streams.
 
-### Future transport
-- WebSocket for richer bidirectional sessions.
+### Current v2 transport status
+- SSE remains for job/worker streams and passive session observation.
+- WebSocket now ships for job/worker/session scoped subscribe flows.
+- session WebSocket now supports interactive continuation (`subscribe`, `input`, `ack`, `resume`, `detach`, `cancel`, `ping`).
+- same-session reconnect uses persisted runtime identity plus transcript cursor/backpressure metadata.
 
 ---
 
@@ -732,6 +745,132 @@ Decision: accepted
 
 Reason:
 - architecture should prepare for richer runtime controls without blocking v1.
+
+---
+
+## 19.1 Distributed-ready control plane seams
+
+The codebase now separates several single-process internals behind explicit seams so a future multi-host coordinator can replace them without rewriting the orchestration core:
+
+- `DispatchQueue` — abstraction for queued job ordering and dequeue semantics
+- `EventPublisher` / `EventSubscriber` / `EventStream` — abstraction for local fan-out plus replay-capable live subscriptions
+- `ControlPlaneCoordinator` — abstraction for:
+  - executor registration,
+  - executor heartbeat,
+  - scheduler dispatch lease,
+  - worker heartbeat assignment
+
+The current implementations are:
+
+- `InMemoryControlPlaneCoordinator` — single-host fallback/reference implementation
+- `SqliteControlPlaneCoordinator` — shared prototype coordinator backend with persisted executor/lease/assignment snapshots
+- `JobQueue` / `SqliteDispatchQueue` — local vs shared queue backends behind the same interface
+- `EventBus` / `PollingStateStoreEventStream` — local in-process fan-out plus state-store polling replay across runtimes
+
+### Current local wiring
+
+- `startOrchestrator()` registers a local executor on boot.
+- the local executor heartbeats periodically while the runtime is active.
+- `Scheduler` acquires the `scheduler:dispatch` lease before dispatching queued jobs.
+- `WorkerManager` publishes per-worker heartbeat assignments while workers are active.
+- `Reconciler` uses fresh worker heartbeat assignments to avoid falsely classifying long-running local workers as orphaned.
+- when configured, `Scheduler` and API live streams can use shared sqlite/polling backends without changing orchestration-layer contracts.
+
+This keeps the current deployment single-host, but removes the assumption that queue ownership and worker liveness must always be inferred only from in-memory objects.
+
+## 19.2 State store concurrency and lease contract
+
+The persistent `StateStore` and the ephemeral coordination channel have different responsibilities:
+
+### `StateStore`
+
+- remains the source of truth for jobs, workers, sessions, events, transcripts, results, and artifacts
+- file backend remains effectively **single-writer / single-host**
+- SQLite backend remains **single-instance coordination**, not a distributed lock manager
+- write ordering must remain append-safe for:
+  - event log,
+  - session transcript log,
+  - result files
+
+### `ControlPlaneCoordinator`
+
+- owns only ephemeral coordination state:
+  - executor presence,
+  - dispatch lease ownership,
+  - worker heartbeat assignments
+- may be replaced later by a shared DB / Redis / dedicated coordinator service
+- must tolerate expiry and takeover semantics without rewriting `Scheduler`, `WorkerManager`, or `Reconciler`
+
+### Lock / lease rule
+
+- persistent lifecycle state continues to be finalized in `StateStore`
+- lease/heartbeat expiry alone must not mutate terminal job/worker results
+- expiry is only a signal that enables reconciliation / takeover logic
+
+This boundary is intentional: durable domain state stays in the `StateStore`, while liveness/ownership hints stay in the coordinator seam.
+
+## 19.3 Pre-multi-host failure matrix
+
+Before introducing remote executors, the control plane should already have a defined response for these failure modes:
+
+| Failure | Current signal | Current response | Future multi-host implication |
+|---------|----------------|------------------|-------------------------------|
+| Scheduler instance loses dispatch lease | `ControlPlaneCoordinator.acquireLease()` returns `null` | skip dispatch loop for that tick | enables single-leader / lease-based scheduler cutover |
+| Local executor stops heartbeating | executor snapshot becomes stale | no new work should be assigned by a future shared coordinator | required for remote executor fencing |
+| Worker record is stale but worker heartbeat is fresh | worker assignment heartbeat remains active | `Reconciler` suppresses orphan repair | prevents false recovery during long-running local tasks |
+| Worker heartbeat expires | worker assignment becomes stale | `Reconciler` may fall back to existing recovery logic | future executor failure detection path |
+| Detached runtime exists with no coordinator heartbeat | runtime recovery helpers inspect PID/session identity | reconcile/terminate/reattach based on runtime mode | bridges current single-host recovery into future external coordination |
+| State store unavailable | persistence calls fail | API / scheduler / worker lifecycle fail fast | shared backend resilience remains a later Phase concern |
+
+These rules intentionally stop short of full distributed execution. They only freeze the seams that a later multi-host coordinator will need.
+
+## 19.4 Multi-host prototype (Phase 5)
+
+The follow-up distributed roadmap extends the earlier seam-validation prototype into a deliberately constrained multi-host control-plane prototype without yet committing to a production distributed runtime.
+
+### Chosen scheduling strategy
+
+- scheduler strategy is fixed to `lease_based_single_leader`
+- the active scheduler instance must hold the `scheduler:dispatch` lease before dispatching queued jobs
+- a second runtime can take over on lease loss / runtime shutdown without changing `Scheduler` internals
+
+### Remote worker-plane minimum contract
+
+The minimum remote execution contract is frozen in `src/control/remotePlane.ts` and currently consists of:
+
+- job claim envelope
+- worker heartbeat envelope
+- worker result publish envelope
+- artifact transport modes:
+  - `shared_filesystem`
+  - `object_store_manifest`
+- result transport modes:
+  - `shared_state_store`
+  - `object_store_manifest`
+
+This contract is intentionally small: it defines what a future remote executor must report, without yet forcing a network protocol or broker choice.
+
+### Prototype boundary
+
+The current prototype is a simulation, not a full remote-network deployment. It uses:
+
+- shared SQLite state store
+- shared SQLite coordinator backend for executor registration / leases / worker assignments
+- shared SQLite dispatch queue backend
+- `state_store_polling` event stream for cross-runtime replay/live catch-up
+- `object_store_manifest` projection for worker/job result paths, logs, and artifact references
+- shared filesystem only as the current blob backing store behind those manifests
+
+That means the prototype now validates shared coordinator/queue semantics, polling-based event replay, and remote-friendly artifact addressing, but it still stops short of a production remote-network deployment. The remaining gaps are broker-backed event transport, an external coordinator service, and a true network object store.
+
+### Current decision
+
+Stay with the internal lease-based prototype for now. Re-evaluate an external coordinator, shared durable queue/event stream, or remote artifact transport only when:
+
+- queue ownership must survive host loss independently of process memory
+- cross-host event fan-out becomes a product requirement
+- artifact / transcript / log transport must leave the shared filesystem
+- remote workers can no longer rely on a shared SQLite + shared filesystem environment
 
 ---
 

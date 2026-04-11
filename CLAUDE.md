@@ -23,9 +23,9 @@ CodexCode CLI (coreline-cli/)  ←  worker runtime (수정 대상 아님)
 - **Language**: TypeScript (strict)
 - **HTTP**: Hono
 - **Validation**: Zod
-- **ID**: ULID (`ulid` 패키지) with prefix (`job_`, `wrk_`, `evt_`, `art_`)
+- **ID**: ULID (`ulid` 패키지) with prefix (`job_`, `wrk_`, `evt_`, `art_`, `sess_`)
 - **Test**: `bun:test`
-- **State Store**: File-backed JSON/NDJSON (`.orchestrator/`)
+- **State Store**: File-backed JSON/NDJSON (`.orchestrator/`) 또는 SQLite (`ORCH_STATE_BACKEND=sqlite`)
 
 ## 빌드 & 실행
 
@@ -46,8 +46,10 @@ bun run release:check  # frozen-lockfile + 전체 릴리스 검증
 ## API 보안 규칙
 
 - `ORCH_API_EXPOSURE=trusted_local`이 기본값이다.
-- `ORCH_API_EXPOSURE=untrusted_network`에서는 `ORCH_API_TOKEN`이 필수다.
+- `ORCH_API_EXPOSURE=untrusted_network`에서는 `ORCH_API_TOKEN` 또는 `ORCH_API_TOKENS`가 필요하다.
+- `ORCH_API_TOKENS`로 named operator/service token(JSON array) 모델을 추가로 구성할 수 있다.
 - 인증 입력은 `Authorization: Bearer <token>`, `X-Orch-Api-Token`, `access_token`(SSE query) 를 허용한다.
+- named token은 `scopes`, `repo_paths`, `job_ids`, `session_ids`로 resource boundary를 제한할 수 있다.
 - external exposure에서는 repo/worktree/log/result/artifact path와 metadata를 redaction 한다.
 
 ## 코드 컨벤션
@@ -72,9 +74,10 @@ bun run release:check  # frozen-lockfile + 전체 릴리스 검증
 - cancel/timeout은 metadata로 기록 → exit callback에서 반영.
 
 ### 상태 전이
-- 모든 상태 전이는 `stateMachine.ts`의 `assertValidJobTransition` / `assertValidWorkerTransition`을 통과해야 함.
+- 모든 상태 전이는 `stateMachine.ts`의 `assertValidJobTransition` / `assertValidWorkerTransition` / `assertValidSessionTransition`을 통과해야 함.
 - Job: `queued → preparing → dispatching → running → aggregating → completed/failed/canceled/timed_out`
 - Worker: `created → starting → active → finishing → finished/failed/canceled/lost`
+- Session: `uninitialized → attached → active → detached → closed`
 
 ### 격리
 - Write 작업: git worktree 격리 필수.
@@ -134,6 +137,18 @@ Worker restart / recovery 정책:
 | POST | /api/v1/workers/:id/stop | Worker 중지 |
 | POST | /api/v1/workers/:id/restart | Worker 재시작 |
 | GET | /api/v1/workers/:id/events | Worker SSE 스트림 |
+| POST | /api/v1/sessions | Session 생성 |
+| GET | /api/v1/sessions/:id | Session 상세 |
+| GET | /api/v1/sessions/:id/transcript | Session transcript 조회 |
+| GET | /api/v1/sessions/:id/diagnostics | Session diagnostics 조회 |
+| POST | /api/v1/sessions/:id/attach | Session 클라이언트 연결 |
+| POST | /api/v1/sessions/:id/detach | Session 클라이언트 분리 |
+| POST | /api/v1/sessions/:id/cancel | Session 종료 |
+| GET | /api/v1/sessions/:id/stream | Session SSE 스트림 |
+| WS | /api/v1/jobs/:id/ws | Job WebSocket 스트림 |
+| WS | /api/v1/workers/:id/ws | Worker WebSocket 스트림 |
+| WS | /api/v1/sessions/:id/ws | Session WebSocket 스트림 |
+| GET | /api/v1/audit | Audit trail 조회 |
 | GET | /api/v1/artifacts/:id | Artifact 메타데이터 |
 | GET | /api/v1/artifacts/:id/content | Artifact 원본 |
 | GET | /api/v1/health | 상태 확인 |
@@ -154,9 +169,15 @@ src/
     eventBus.ts            # Typed in-process 이벤트 버스
   config/
     config.ts              # OrchestratorConfig 로딩
+    releaseHygiene.ts      # 릴리스 품질 게이트 (exact pinning, lockfile)
+  control/
+    coordination.ts        # Executor registry / scheduler lease / worker heartbeat seam
+    remotePlane.ts         # Remote worker-plane claim/heartbeat/result contract
   storage/
     types.ts               # StateStore 인터페이스
+    createStateStore.ts    # Backend factory (file | sqlite)
     fileStateStore.ts      # 파일 기반 구현
+    sqliteStateStore.ts    # SQLite 기반 구현 (v2)
     safeWrite.ts           # Atomic write (temp → rename)
   isolation/
     repoPolicy.ts          # Repo allowlist 검증
@@ -165,7 +186,10 @@ src/
     types.ts               # RuntimeAdapter 인터페이스
     recovery.ts            # Detached runtime recovery/disposition helper
     invocationBuilder.ts   # codexcode 명령 조합
+    sessionWorkerClientAdapter.ts  # Session file transport adapter
     processRuntimeAdapter.ts  # Process spawn/stop/status
+  sessions/
+    sessionManager.ts      # Session 생명주기 관리 (v2)
   workers/
     workerManager.ts       # Worker 생명주기 관리
   logs/
@@ -183,12 +207,17 @@ src/
     routes/
       jobs.ts
       workers.ts
+      sessions.ts          # Session lifecycle API (v2)
       artifacts.ts
       health.ts
       events.ts            # SSE 스트리밍
+      realtime.ts          # WebSocket subscribe/control (v2)
   reconcile/
     reconciler.ts          # Orphan worker 감지
     cleanup.ts             # Stale worktree/log 정리
+  ops/
+    smoke.ts               # E2E smoke 시나리오 (fixture/real)
+    migration.ts           # File→SQLite migration dry-run
   types/
     api.ts                 # API request/response DTO
 ```
@@ -211,6 +240,8 @@ src/
 
 v1 실행 로드맵은 `dev-plan/implement_20260410_214510.md`를 따른다.
 post-v1 hardening 이력은 `dev-plan/implement_20260411_094401.md`를 참조한다.
+v2 staged upgrade 계획은 `dev-plan/implement_20260411_120538.md`를 따른다.
+post-v2 follow-up 계획은 `dev-plan/implement_20260411_135150.md`를 따른다.
 초기 스캐폴딩 이력은 `dev-plan/implement_20260404_230535.md`를 참조한다.
 
 | Phase | 이름 | 상태 |
@@ -240,19 +271,48 @@ post-v1 hardening 이력은 `dev-plan/implement_20260411_094401.md`를 참조한
 | Access Control & Exposure Hardening | 완료 |
 | Real Runtime Verification & Ops Readiness | 완료 |
 
-현재 다음 우선순위:
-- v2 Phase 2 실행 (`dev-plan/implement_20260411_120538.md`)
-- session-aware runtime foundation 착수
+현재 다음 우선순위 (`dev-plan/implement_20260411_210712.md`):
+- Phase 1: External Coordinator & Fencing Contract Freeze — 완료
+- Phase 2: Shared Queue / Shared Event Stream Backbone — 완료
+- Phase 3: Remote Artifact / Log / Transcript Transport — 완료
+- Phase 4: Remote Executor Worker-plane Integration — 완료
+- Phase 5: Cutover / Rollback / Failover Ops Hardening — 완료
+
+직전 follow-up (`dev-plan/implement_20260411_135150.md`):
+- Phase 1: True Session Runtime & Reattach (interactive continuation) — 완료
+- Phase 2: Interactive Transport, Transcript, Operator Diagnostics — 완료
+- Phase 3: AuthN/AuthZ/Audit Hardening — 완료
+- Phase 4: Distributed-ready Control Plane Seams — 완료
+- Phase 5: Multi-host Execution MVP Plan or Prototype — 완료
 
 릴리스 규칙:
 - dependency/devDependency는 exact version만 허용
 - lockfile 재현성 검증은 `bun run install:locked`
 - release 전 표준 검증은 `bun run release:check`
-- 운영 smoke 명령은 `bun run ops:smoke:fixture`, `bun run ops:smoke:timeout:fixture`, `bun run ops:smoke:real`
+- 운영 smoke 명령은 `bun run ops:smoke:fixture`, `bun run ops:smoke:timeout:fixture`, `bun run ops:smoke:v2:session:fixture`, `bun run ops:smoke:session:reattach:fixture`, `bun run ops:smoke:real`, `bun run ops:smoke:multihost:prototype`
+- migration rehearsal은 `bun run ops:migrate:dry-run`, 통합 gate는 `bun run release:v2:check`
+- distributed prototype gate는 `bun run ops:verify:distributed`, `bun run release:distributed:check`
 
 노출 제어 규칙:
 - external exposure에서는 API token 없이는 `/api/v1/*`와 SSE 접근 불가
 - allowlist 에러는 external exposure에서 repo path를 숨긴다
+
+v2 진행 상태:
+- v2 Phase 1 완료: session/runtime/storage/WebSocket 계약과 migration guardrail 잠금
+- v2 Phase 2 완료: `SessionManager`, `StateStore` session persistence, `/api/v1/sessions/*` lifecycle API, startup/shutdown session reconciliation
+- v2 Phase 3 완료: `SqliteStateStore`, file→SQLite bootstrap import, `ORCH_STATE_BACKEND`/`ORCH_STATE_IMPORT_FROM_FILE`/`ORCH_STATE_SQLITE_PATH`, backend parity/boot integration test
+- v2 Phase 4 완료: `/api/v1/jobs/:id/ws`, `/api/v1/workers/:id/ws`, `/api/v1/sessions/:id/stream|ws`, subscribe protocol, session WS detach/cancel control, auth-guarded WebSocket upgrade
+- v2 Phase 5 완료: session/SQLite/WebSocket E2E fixture smoke, file→SQLite migration dry-run + rollback rehearsal, `docs/MIGRATION-V2.md`, `docs/V2-READINESS.md`, `release:v2:check`
+- post-v2 Phase 1 완료: `SessionWorkerClientAdapter`, persisted runtime identity/cursor/backpressure, same-session WS input/ack/resume flow, reattach smoke, sqlite parity verification
+- post-v2 Phase 2 완료: persisted session transcript storage/file+sqlite parity, `/api/v1/sessions/:id/transcript|diagnostics`, WS transcript replay/resume semantics, operator heartbeat/backpressure diagnostics, session smoke/migration verification
+- post-v2 Phase 3 완료: named operator/service token auth, repo/job/session scoped authorization, `/api/v1/audit` query surface, audit trail for control actions, and named-token SSE/WS regression coverage
+- post-v2 Phase 4 완료: `DispatchQueue` / `EventPublisher` seam, `InMemoryControlPlaneCoordinator`, local executor registration/heartbeat, scheduler dispatch lease, worker heartbeat assignment, and heartbeat-aware reconcile suppression
+- post-v2 Phase 5 완료: lease-based single-leader multi-host prototype using shared SQLite + shared filesystem, `createOrchestratorRuntime` / `stopRuntime` detached runtime helpers, `src/control/remotePlane.ts` contract, and `ops:smoke:multihost:prototype`
+- distributed follow-up Phase 1 완료: stable coordinator snapshot DTO, monotonic fencing token helper, `SqliteControlPlaneCoordinator`, and `createControlPlaneCoordinator`
+- distributed follow-up Phase 2 완료: `SqliteDispatchQueue`, `PollingStateStoreEventStream`, runtime wiring via `createDispatchQueue` / `createEventStream`, and cross-host replay-safe SSE/WS subscription offsets
+- distributed follow-up Phase 3 완료: `object_store_manifest` transport, manifest-aware result/log/artifact readers, and manifest-backed terminal worker/job path publication
+- distributed follow-up Phase 4 완료: remote worker-plane fencing metadata, executor-local drain semantics in `stopRuntime()`, and shared coordinator/queue/event wiring in the multi-host prototype
+- distributed follow-up Phase 5 완료: distributed verification commands (`ops:verify:distributed`, `release:distributed:check`), failover smoke validation, and operations/architecture/doc sync
 
 ## 설계 문서
 
@@ -264,6 +324,8 @@ post-v1 hardening 이력은 `dev-plan/implement_20260411_094401.md`를 참조한
 | [docs/IMPLEMENTATION-PLAN.md](docs/IMPLEMENTATION-PLAN.md) | 4단계 구현 계획 |
 | [docs/API-DRAFT.md](docs/API-DRAFT.md) | API 계약서 |
 | [docs/OPERATIONS.md](docs/OPERATIONS.md) | 운영 runbook / smoke 절차 |
+| [docs/MIGRATION-V2.md](docs/MIGRATION-V2.md) | v2 file→SQLite cutover / rollback 절차 |
+| [docs/V2-READINESS.md](docs/V2-READINESS.md) | v2 compatibility / release gate |
 | [docs/RELEASE-NOTES.md](docs/RELEASE-NOTES.md) | 릴리스 노트 |
 | [docs/OSS-COMPARISON.md](docs/OSS-COMPARISON.md) | OSS 비교 분석 |
 | [docs/IMPL-DETAIL.md](docs/IMPL-DETAIL.md) | 상세 구현계획 (impl-plan 스킬) |
@@ -272,10 +334,14 @@ post-v1 hardening 이력은 `dev-plan/implement_20260411_094401.md`를 참조한
 | [dev-plan/implement_20260411_094401.md](dev-plan/implement_20260411_094401.md) | post-v1 P0 hardening 패치 계획/검증 |
 | [dev-plan/implement_20260411_104301.md](dev-plan/implement_20260411_104301.md) | post-P0 P1/P2 hardening backlog |
 | [dev-plan/implement_20260411_120538.md](dev-plan/implement_20260411_120538.md) | v2 staged upgrade 계획 |
+| [dev-plan/implement_20260411_135150.md](dev-plan/implement_20260411_135150.md) | post-v2 follow-up 계획 (session runtime/auth/distributed) |
+| [dev-plan/implement_20260411_210712.md](dev-plan/implement_20260411_210712.md) | distributed control-plane follow-up 계획 (coordinator/queue/transport/failover) |
 | [dev-plan/implement_20260404_230535.md](dev-plan/implement_20260404_230535.md) | 실행 계획 (dev-plan-generator 스킬) |
 
-## v1 제외 사항 (Out of Scope)
+## 현재 제외 사항 (Out of Scope)
 
-- 분산 multi-host / Session-aware adapter / WebSocket
-- Object storage / Multi-tenant auth
+- production-grade external coordinator service (Redis/etcd/custom control service)
+- broker-backed durable event stream / queue cutover
+- network object store / remote blob transport cutover
+- multi-tenant SaaS layer / advanced RBAC policy engine
 - CodexCode CLI 내부 수정 / UI

@@ -265,7 +265,7 @@ export async function runSmokeScenario(
     config,
     enableServer: verifySessionFlow,
     stateRootDir,
-    version: '0.1.0-smoke',
+    version: '0.3.0-smoke',
   })
 
   const request = createSmokeRequest(runtime, config)

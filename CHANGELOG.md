@@ -2,6 +2,21 @@
 
 ## 2026-04-11
 
+### feat(v2): freeze session api and migration guardrails (`209376a`)
+- froze the v2 session/runtime/storage/WebSocket contract and documented migration guardrails
+- established session API/request/response types and compatibility expectations for future reattach work
+- synchronized roadmap/docs before the broader v2/session/distributed implementation work
+
+### feat(orchestrator): add session runtime and distributed prototype foundations (`4c71190`)
+- shipped persisted session runtime, transcript, diagnostics, auth/audit, SQLite state store, WebSocket control, and same-session reattach support
+- added distributed-ready seams and shared prototype backends: sqlite coordinator, sqlite queue, polling event stream, manifest transport, and multi-host failover smoke
+- expanded ops tooling with migration rehearsal, session smoke, distributed prototype verification, and remote worker-plane fencing metadata
+
+### docs(plan): sync architecture, operations, and distributed roadmap state (`858f1ae`)
+- synchronized README / CLAUDE / AGENTS / ARCHITECTURE / OPERATIONS / V2 readiness docs with the shipped v2 + distributed prototype state
+- recorded post-v2 follow-up completion and the distributed control-plane follow-up plan under `dev-plan/`
+- documented manifest transport, failover assumptions, distributed verification commands, and next roadmap direction
+
 ### feat(engine): add core runtime storage and scheduler foundations (`ecc383e`)
 - added core domain models, IDs, state machine, events, and in-process event bus
 - added file-backed state store, repo/worktree isolation, log collection, result aggregation, runtime adapter, worker manager, and scheduler

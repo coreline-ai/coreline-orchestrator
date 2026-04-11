@@ -200,7 +200,7 @@ async function createApiHarness(
     eventBus,
     logIndex: new LogIndex(),
     startedAt: '2026-04-11T00:00:00.000Z',
-    version: '0.1.0',
+    version: '0.3.0',
   })
 
   return {

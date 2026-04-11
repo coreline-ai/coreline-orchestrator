@@ -1,5 +1,42 @@
 # Release Notes
 
+## 2026-04-11 — v0.3.0 session runtime + distributed prototype
+
+### Highlights
+- session runtime is now real, not lifecycle-only: same-session reattach, interactive input/output/ack/resume flow, transcript persistence, and operator diagnostics are shipped.
+- optional SQLite state store, named-token auth, scoped authorization, audit trail, and WebSocket control surfaces are all shipped as additive upgrades over the v1 process-mode baseline.
+- distributed prototype foundations are shipped: sqlite coordinator, sqlite dispatch queue, polling-backed event replay, manifest-backed artifact/log/result projection, and lease-based multi-host failover smoke.
+
+### Runtime and orchestration
+- session workers now persist runtime identity, transcript cursor, and backpressure state.
+- startup/shutdown/reconcile flows can reattach supported session runtimes and preserve same-session continuation semantics.
+- `stopRuntime()` now drains only the local executor, while singleton shutdown semantics remain in `stopOrchestrator()`.
+
+### Storage and transport
+- `file` and `sqlite` state backends both support jobs, workers, sessions, transcripts, events, and artifact indexing.
+- `object_store_manifest` transport projects artifacts, logs, and results through remote-friendly manifest paths while preserving sandbox rules.
+- file → SQLite migration dry-run and rollback rehearsal remain part of the supported operator workflow.
+
+### Control plane and failover
+- scheduler dispatch ownership now flows through explicit lease/fencing contracts.
+- worker ownership is tracked through executor heartbeat assignments.
+- multi-host prototype verification confirms leader failover from `exec_alpha` to `exec_beta` using shared sqlite-backed coordination and queueing.
+
+### Verification
+- `bun test`
+- `bun run build`
+- `bun run ops:verify:v2`
+- `bun run ops:verify:distributed`
+- `bun run ops:smoke:real`
+
+### Next roadmap
+- next workstream moves from prototype seams to production distributed infrastructure:
+  - external coordinator service
+  - broker-backed durable queue / event stream
+  - network object-store cutover
+  - remote executor network worker-plane
+  - production cutover / rollback / failover hardening
+
 ## 2026-04-11 — v1 orchestrator + hardening baseline
 
 ### Highlights

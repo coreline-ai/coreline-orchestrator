@@ -271,14 +271,20 @@ post-v2 follow-up 계획은 `dev-plan/implement_20260411_135150.md`를 따른다
 | Access Control & Exposure Hardening | 완료 |
 | Real Runtime Verification & Ops Readiness | 완료 |
 
-현재 다음 우선순위 (`dev-plan/implement_20260411_210712.md`):
+현재 다음 우선순위 (`dev-plan/implement_20260411_225207.md`):
+- Phase 1: External Coordinator Service & Fencing Enforcement — 미시작
+- Phase 2: Durable Broker-backed Queue / Event Stream — 미시작
+- Phase 3: Network Object-store Transport Cutover — 미시작
+- Phase 4: Remote Executor Network Worker-plane MVP — 미시작
+- Phase 5: Production Cutover / Rollback / Failover Readiness — 미시작
+
+직전 distributed follow-up (`dev-plan/implement_20260411_210712.md`):
 - Phase 1: External Coordinator & Fencing Contract Freeze — 완료
 - Phase 2: Shared Queue / Shared Event Stream Backbone — 완료
 - Phase 3: Remote Artifact / Log / Transcript Transport — 완료
 - Phase 4: Remote Executor Worker-plane Integration — 완료
 - Phase 5: Cutover / Rollback / Failover Ops Hardening — 완료
-
-직전 follow-up (`dev-plan/implement_20260411_135150.md`):
+그 이전 follow-up (`dev-plan/implement_20260411_135150.md`):
 - Phase 1: True Session Runtime & Reattach (interactive continuation) — 완료
 - Phase 2: Interactive Transport, Transcript, Operator Diagnostics — 완료
 - Phase 3: AuthN/AuthZ/Audit Hardening — 완료
@@ -336,6 +342,7 @@ v2 진행 상태:
 | [dev-plan/implement_20260411_120538.md](dev-plan/implement_20260411_120538.md) | v2 staged upgrade 계획 |
 | [dev-plan/implement_20260411_135150.md](dev-plan/implement_20260411_135150.md) | post-v2 follow-up 계획 (session runtime/auth/distributed) |
 | [dev-plan/implement_20260411_210712.md](dev-plan/implement_20260411_210712.md) | distributed control-plane follow-up 계획 (coordinator/queue/transport/failover) |
+| [dev-plan/implement_20260411_225207.md](dev-plan/implement_20260411_225207.md) | production distributed roadmap (external coordinator/broker/object-store/remote executor) |
 | [dev-plan/implement_20260404_230535.md](dev-plan/implement_20260404_230535.md) | 실행 계획 (dev-plan-generator 스킬) |
 
 ## 현재 제외 사항 (Out of Scope)

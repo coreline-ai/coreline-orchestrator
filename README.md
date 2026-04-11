@@ -582,6 +582,14 @@ coreline-orchestrator/
 - `stopRuntime()`은 **local executor drain**만 수행하고, `stopOrchestrator()`만 singleton global shutdown semantics를 유지함
 - shared filesystem은 현재도 manifest blob backing store로 사용되며, true network object store cutover는 다음 로드맵 범위다
 
+### Next Roadmap ([dev-plan](dev-plan/implement_20260411_225207.md))
+
+- 🔲 Phase 1: External Coordinator Service & Fencing Enforcement
+- 🔲 Phase 2: Durable Broker-backed Queue / Event Stream
+- 🔲 Phase 3: Network Object-store Transport Cutover
+- 🔲 Phase 4: Remote Executor Network Worker-plane MVP
+- 🔲 Phase 5: Production Cutover / Rollback / Failover Readiness
+
 ---
 
 ## 📚 Documentation
@@ -606,6 +614,7 @@ coreline-orchestrator/
 | [`dev-plan/implement_20260411_120538.md`](dev-plan/implement_20260411_120538.md) | v2 staged upgrade plan (session runtime / SQLite / WebSocket) |
 | [`dev-plan/implement_20260411_135150.md`](dev-plan/implement_20260411_135150.md) | Post-v2 follow-up plan (session reattach / auth / distributed) |
 | [`dev-plan/implement_20260411_210712.md`](dev-plan/implement_20260411_210712.md) | Distributed control-plane follow-up plan (coordinator / queue / transport / failover) |
+| [`dev-plan/implement_20260411_225207.md`](dev-plan/implement_20260411_225207.md) | Production distributed roadmap (external coordinator / broker / object store / remote executor) |
 | [`CLAUDE.md`](CLAUDE.md) | AI agent project context |
 
 ---

@@ -189,7 +189,7 @@ export async function createOrchestratorRuntime(
     eventBus,
     logIndex,
     startedAt,
-    version: options.version ?? '0.1.0',
+    version: options.version ?? '0.3.0',
   })
 
   const server =

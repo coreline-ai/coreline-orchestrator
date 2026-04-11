@@ -514,7 +514,7 @@ bun test src/scheduler/
 - [ ] TC-7.9: `POST /api/v1/workers/:workerId/restart` — failed worker 재시작 → 200 + 새 worker 정보 반환
 - [ ] TC-7.10: `GET /api/v1/artifacts/:artifactId` — metadata 반환
 - [ ] TC-7.11: `GET /api/v1/artifacts/:artifactId/content` — raw content 반환
-- [ ] TC-7.12: `GET /api/v1/health` → `{status: 'ok', version: '0.1.0'}`
+- [ ] TC-7.12: `GET /api/v1/health` → `{status: 'ok', version: '0.3.0'}`
 - [ ] TC-7.13: `GET /api/v1/capacity` → `{max_workers, active_workers, queued_jobs, available_slots}` 숫자 정확
 - [ ] TC-7.14: `GET /api/v1/metrics` → 집계 숫자 필드 존재
 - [ ] TC-7.15: SSE `GET /api/v1/jobs/:jobId/events` — job 생성 후 이벤트 스트림 수신 확인

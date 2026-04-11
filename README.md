@@ -6,7 +6,7 @@
     <a href="https://bun.sh/"><img src="https://img.shields.io/badge/Bun-Runtime-f9f1e1?style=flat-square&logo=bun&logoColor=black" alt="Bun" /></a>
     <a href="https://hono.dev/"><img src="https://img.shields.io/badge/Hono-HTTP-E36002?style=flat-square&logo=hono&logoColor=white" alt="Hono" /></a>
     <img src="https://img.shields.io/badge/License-Private-red?style=flat-square" alt="License" />
-    <a href="#-roadmap"><img src="https://img.shields.io/badge/Status-Phase_0_In_Progress-yellow?style=flat-square" alt="Phase" /></a>
+    <a href="#-roadmap"><img src="https://img.shields.io/badge/Status-Phase_8_Complete-brightgreen?style=flat-square" alt="Phase" /></a>
   </p>
   <br />
   <p><em>Orchestrate many. Execute in isolation. Aggregate with confidence.</em></p>
@@ -169,10 +169,27 @@ curl http://localhost:3100/api/v1/jobs/<job_id>/results
 
 | Environment Variable | Default | Description |
 |---------------------|---------|-------------|
+| `ORCH_HOST` | `127.0.0.1` | API bind host |
 | `ORCH_PORT` | `3100` | API server port |
+| `ORCH_API_EXPOSURE` | `trusted_local` | `trusted_local` or `untrusted_network` |
+| `ORCH_API_TOKEN` | — | Required when `ORCH_API_EXPOSURE=untrusted_network` |
 | `ORCH_MAX_WORKERS` | `4` | Maximum concurrent workers |
 | `ORCH_ALLOWED_REPOS` | — | Comma-separated allowed repo paths |
+| `ORCH_ROOT_DIR` | `.orchestrator` | Orchestrator state/log/result directory name |
 | `ORCH_WORKER_BINARY` | `codexcode` | Worker CLI binary path |
+
+### API Authentication & Redaction
+
+- 기본값 `trusted_local`에서는 인증 없이 내부 운영용 API를 사용합니다.
+- `ORCH_API_EXPOSURE=untrusted_network`에서는 `ORCH_API_TOKEN`이 필수입니다.
+- 인증 방식:
+  - `Authorization: Bearer <token>`
+  - `X-Orch-Api-Token: <token>`
+  - SSE 호환 query token: `?access_token=<token>`
+- `untrusted_network` 모드에서는 민감 경로/메타데이터가 redaction 됩니다:
+  - repo / worktree / log / result / artifact path → `null`
+  - metadata objects → `{}`
+  - allowlist error의 repo path detail 제거
 
 ---
 
@@ -203,6 +220,14 @@ curl http://localhost:3100/api/v1/jobs/<job_id>/results
 | `POST` | `/workers/:id/restart` | 🔄 Restart a worker |
 | `GET` | `/workers/:id/events` | 📡 SSE event stream |
 
+> `POST /workers/:id/restart`는 process-mode에서 **같은 worker 실행을 재부착/재시작하는 API가 아니다**.  
+> terminal worker를 기준으로 **새 retry job/worker를 생성하는 `retry_job_clone` 동작**이다.
+>
+> startup recovery에서는 **runtime handle 없는 live process-mode worker를 재부착하지 않는다**.  
+> 오케스트레이터는 해당 PID를 terminate 시도 후 `lost`로 정리하고 job을 재큐잉한다.
+>
+> `ORCH_API_EXPOSURE=untrusted_network`일 때는 모든 `/api/v1/*` endpoint와 SSE stream이 API token을 요구하며, worker/job/artifact detail의 path/metadata 필드는 redaction 된다.
+
 ### Artifacts & System
 
 | Method | Endpoint | Description |
@@ -212,6 +237,9 @@ curl http://localhost:3100/api/v1/jobs/<job_id>/results
 | `GET` | `/health` | 💚 Health check |
 | `GET` | `/capacity` | 📈 Capacity info |
 | `GET` | `/metrics` | 📊 Aggregated metrics |
+
+> Artifact API는 **repo 내부 상대 경로 artifact** 또는 **orchestrator synthetic artifact**만 제공한다.  
+> absolute path, `..` traversal, repo 밖 canonical path는 `ARTIFACT_ACCESS_DENIED`(403)로 차단된다.
 
 ### Error Response Format
 
@@ -235,6 +263,7 @@ curl http://localhost:3100/api/v1/jobs/<job_id>/results
 | `WORKER_NOT_FOUND` | 404 | Worker does not exist |
 | `SESSION_NOT_FOUND` | 404 | Session does not exist |
 | `ARTIFACT_NOT_FOUND` | 404 | Artifact does not exist |
+| `ARTIFACT_ACCESS_DENIED` | 403 | Artifact path is outside the allowed sandbox |
 | `REPO_NOT_ALLOWED` | 403 | Repository not in allowlist |
 | `INVALID_STATE_TRANSITION` | 409 | Invalid state change |
 | `CAPACITY_EXCEEDED` | 429 | Max workers reached |
@@ -328,7 +357,8 @@ coreline-orchestrator/
 │   └── IMPL-DETAIL.md             #   Detailed implementation spec
 │
 ├── 📂 dev-plan/                    # Active development tracking
-│   └── implement_20260404_230535.md
+│   ├── implement_20260410_214510.md
+│   └── implement_20260411_094401.md
 │
 └── 📂 src/
     ├── index.ts                    # Bootstrap: start / stop orchestrator
@@ -355,6 +385,7 @@ coreline-orchestrator/
     │
     ├── 📂 runtime/                 # Worker execution
     │   ├── types.ts                #   RuntimeAdapter interface
+    │   ├── recovery.ts             #   Recovery classification & detached PID control
     │   ├── invocationBuilder.ts    #   CLI command assembly
     │   └── processRuntimeAdapter.ts #  Process spawn/stop/status
     │
@@ -412,17 +443,33 @@ coreline-orchestrator/
 
 | Phase | Name | Status | Description |
 |:-----:|------|:------:|-------------|
-| 0 | Project Scaffolding | 🔲 | 프로젝트 구조, 빌드/테스트 인프라 |
-| 1 | Core Domain | 🔲 | 타입, 상태 머신, ID, 에러, 이벤트 |
-| 2 | Storage Layer | 🔲 | 파일 기반 StateStore |
-| 3 | Isolation Layer | 🔲 | Config, repo policy, worktree |
-| 4 | Runtime Layer | 🔲 | RuntimeAdapter, process spawn, logs |
-| 5 | Worker Lifecycle | 🔲 | Worker 생명주기, 결과 집계 |
-| 6 | Scheduler | 🔲 | Queue, capacity, dispatch loop |
-| 7 | API & SSE | 🔲 | HTTP endpoints, event streaming |
-| 8 | Advanced Lifecycle | 🔲 | Reconciliation, retry, shutdown |
+| 0 | Project Scaffolding | 🟢 | 프로젝트 구조, 빌드/테스트 인프라 |
+| 1 | Core Domain | 🟢 | 타입, 상태 머신, ID, 에러, 이벤트 |
+| 2 | Storage Layer | 🟢 | 파일 기반 StateStore |
+| 3 | Isolation Layer | 🟢 | Config, repo policy, worktree |
+| 4 | Runtime Layer | 🟢 | RuntimeAdapter, process spawn, logs |
+| 5 | Worker Lifecycle | 🟢 | Worker 생명주기, 결과 집계 |
+| 6 | Scheduler | 🟢 | Queue, capacity, dispatch loop |
+| 7 | API & SSE | 🟢 | HTTP endpoints, event streaming |
+| 8 | Advanced Lifecycle | 🟢 | Reconciliation, retry, shutdown |
 
 > 🟢 Complete &nbsp; 🔶 In Progress &nbsp; 🔲 Not Started
+
+### Post-v1 Hardening — 2026-04-11
+
+| Area | Status | Notes |
+|------|:------:|-------|
+| Terminal cancel protection | 🟢 | Terminal job은 더 이상 cancel로 overwrite되지 않음 |
+| Handle-less PID stop fallback | 🟢 | 재시작 후 runtime handle이 없어도 live PID terminate 시도 |
+| Artifact path sandbox | 🟢 | absolute/traversal/out-of-repo artifact 차단 |
+| File store read-path hardening | 🟢 | `jobs`/`workers`/`artifacts` index + event parse cache로 full-scan 비용 완화 |
+| Release hygiene & dependency pinning | 🟢 | exact dependency pinning + frozen-lockfile + release verification scripts |
+| Access control & exposure hardening | 🟢 | token auth + SSE query token + external redaction policy |
+| Real runtime verification & ops readiness | 🟢 | CI-safe fixture smoke + manual `codexcode` smoke + operations runbook |
+
+남은 후속 과제:
+- session-aware runtime reattach
+- multi-tenant auth / RBAC / audit trail
 
 ### v2 — Future
 
@@ -443,8 +490,13 @@ coreline-orchestrator/
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | System architecture, ADRs, failure model |
 | [`docs/IMPLEMENTATION-PLAN.md`](docs/IMPLEMENTATION-PLAN.md) | 4-phase implementation strategy |
 | [`docs/API-DRAFT.md`](docs/API-DRAFT.md) | Full API contract with examples |
+| [`docs/OPERATIONS.md`](docs/OPERATIONS.md) | Operations runbook, smoke commands, and operator procedures |
 | [`docs/OSS-COMPARISON.md`](docs/OSS-COMPARISON.md) | Build-vs-buy analysis (Temporal, LangGraph, etc.) |
 | [`docs/IMPL-DETAIL.md`](docs/IMPL-DETAIL.md) | Granular task breakdown with test cases |
+| [`dev-plan/implement_20260410_214510.md`](dev-plan/implement_20260410_214510.md) | Current phased execution roadmap |
+| [`dev-plan/implement_20260411_094401.md`](dev-plan/implement_20260411_094401.md) | Post-v1 P0 hardening patch plan & verification |
+| [`dev-plan/implement_20260411_104301.md`](dev-plan/implement_20260411_104301.md) | Post-P0 P1/P2 hardening backlog |
+| [`dev-plan/implement_20260411_120538.md`](dev-plan/implement_20260411_120538.md) | v2 staged upgrade plan (session runtime / SQLite / WebSocket) |
 | [`CLAUDE.md`](CLAUDE.md) | AI agent project context |
 
 ---
@@ -455,13 +507,36 @@ coreline-orchestrator/
 
 ```bash
 bun install          # Install dependencies
+bun run install:locked  # Verify frozen-lockfile install
 bun run dev          # Start dev server
 bun run build        # Build for production
 bun run start        # Start production server
 bun test             # Run all tests
 bun test src/core/   # Run specific module tests
-bunx tsc --noEmit    # Type check only
+bun run typecheck    # Type check only
+bun run check:release-hygiene  # Check exact pinning + lockfile/script drift
+bun run ops:smoke:fixture  # CI-safe success smoke with fixture worker
+bun run ops:smoke:timeout:fixture  # CI-safe timeout smoke with fixture worker
+bun run ops:smoke:real  # Manual real-worker smoke using codexcode
+bun run verify       # Tests + typecheck + build + release hygiene checks
+bun run release:check  # Frozen-lockfile install + full release verification
 ```
+
+### Release Hygiene
+
+- dependencies/devDependencies는 `latest`나 version range 대신 **exact version**만 사용합니다.
+- dependency 변경 후에는 `bun install`로 `bun.lock`을 갱신하고 `bun run check:release-hygiene`를 통과시켜야 합니다.
+- release 전 표준 검증 명령은 `bun run release:check`입니다.
+- 명령/검증 절차 변경 시 `README.md`, `CLAUDE.md`, `AGENTS.md`, `dev-plan/*`를 같이 갱신합니다.
+
+### Operations Smoke
+
+- CI-safe smoke:
+  - `bun run ops:smoke:fixture`
+  - `bun run ops:smoke:timeout:fixture`
+- manual real-worker smoke:
+  - `bun run ops:smoke:real`
+- 상세 운영 절차와 curl 예시는 [`docs/OPERATIONS.md`](docs/OPERATIONS.md)를 참고합니다.
 
 ### Code Conventions
 

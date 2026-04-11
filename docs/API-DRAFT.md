@@ -358,6 +358,9 @@ Preferred transport:
 - SSE in v1 for simplicity.
 - WebSocket may be added later.
 
+Authentication note:
+- in `untrusted_network`, pass `Authorization: Bearer <token>` or `?access_token=<token>`.
+
 ### Example SSE event stream
 
 ```text
@@ -401,6 +404,9 @@ data: {"job_id":"job_01JABCXYZ","status":"completed"}
 }
 ```
 
+External exposure note:
+- in `untrusted_network`, `repo_path` and `worktree_path` become `null`.
+
 ---
 
 ## 7.2 Get Worker
@@ -426,6 +432,9 @@ data: {"job_id":"job_01JABCXYZ","status":"completed"}
   "updated_at": "2026-04-04T12:31:22Z"
 }
 ```
+
+External exposure note:
+- in `untrusted_network`, `repo_path`, `worktree_path`, `log_path`, `result_path` are `null` and `metadata` is `{}`.
 
 ---
 
@@ -513,15 +522,29 @@ data: {"worker_id":"worker_01JWORKER","status":"completed"}
 }
 ```
 
+Notes:
+- v1 process mode does **not** reattach to the same live execution unit.
+- This endpoint creates a **new retry job/worker attempt** derived from the terminal worker's job.
+- `reuse_context` is future-facing and currently ignored for process mode.
+
 ### Response
 
 ```json
 {
   "previous_worker_id": "worker_01JWORKER",
+  "previous_worker_terminal_status": "failed",
+  "restart_mode": "retry_job_clone",
+  "retried_job_id": "job_01JABCXYZ_R1",
   "new_worker_id": "worker_01JWORKER_R1",
-  "status": "starting"
+  "status": "active"
 }
 ```
+
+### Recovery behavior note
+
+- if the orchestrator restarts and finds a process-mode worker with a live PID but no runtime handle,
+  it attempts termination and then reconciles the worker as `lost`.
+- periodic reconcile should not enqueue jobs that still have active non-stale workers.
 
 ---
 
@@ -621,6 +644,9 @@ Session APIs are future-facing but should be designed now to avoid breaking chan
 }
 ```
 
+External exposure note:
+- in `untrusted_network`, artifact metadata `path` is `null`, but authenticated content download still works.
+
 ## 9.2 Get Artifact Content
 
 ### Request
@@ -703,8 +729,8 @@ All non-2xx responses should return a structured error object.
 
 ### Recommended error codes
 - `INVALID_REQUEST`
-- `UNAUTHORIZED`
-- `FORBIDDEN`
+- `AUTHENTICATION_REQUIRED`
+- `ARTIFACT_ACCESS_DENIED`
 - `JOB_NOT_FOUND`
 - `WORKER_NOT_FOUND`
 - `SESSION_NOT_FOUND`
@@ -716,6 +742,7 @@ All non-2xx responses should return a structured error object.
 - `WORKER_LOST`
 - `TIMEOUT_EXCEEDED`
 - `ARTIFACT_NOT_FOUND`
+- `INVALID_CONFIGURATION`
 - `INTERNAL_ERROR`
 
 ---
@@ -723,9 +750,14 @@ All non-2xx responses should return a structured error object.
 ## 12. Authentication and Authorization
 
 ## 12.1 v1 recommendation
-- operator-authenticated internal service,
-- bearer token or session cookie,
-- single-tenant or trusted-network deployment.
+- `trusted_local` mode: no auth, intended for loopback/internal operator use.
+- `untrusted_network` mode: `ORCH_API_TOKEN` required.
+- accepted credentials:
+  - `Authorization: Bearer <token>`
+  - `X-Orch-Api-Token: <token>`
+  - SSE-compatible query token: `?access_token=<token>`
+- in `untrusted_network`, sensitive path fields are redacted to `null` and metadata objects are redacted to `{}`.
+- allowlist failures redact repo path details in external mode.
 
 ## 12.2 Future direction
 - per-user access control,

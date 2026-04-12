@@ -1,8 +1,9 @@
 # Release Notes
 
-## 2026-04-12 — production operating-model hardening
+## 2026-04-12 — v0.4.0 production operating-model hardening
 
 ### Highlights
+- `v0.4.0` tags the production operating-model hardening milestone.
 - provider contract matrix and distributed readiness/alerting surfaces are now shipped for the service-backed distributed path
 - named distributed credentials with primary-token selection are now supported across coordinator/event/object-store/remote-executor clients
 - release-candidate automation and GA ship/no-ship guidance are now fixed through dedicated commands and operator docs
@@ -46,13 +47,13 @@
 - `bun run ops:smoke:real`
 
 ### Next roadmap
-- source plan: `dev-plan/implement_20260412_160606.md`
-- next workstream moves from shipped service/distributed follow-up to production operating model hardening:
-  - production backend/provider contract freeze
-  - observability / SLI/SLO / alerting hardening
-  - executor identity / transport auth / secret rotation
-  - load / soak / chaos / canary automation
-  - GA readiness / release gate / operator automation
+- source plan: `dev-plan/implement_20260412_190027.md`
+- next workstream moves from GA-ready operating-model hardening to post-GA production cutover and resilience:
+  - provider cutover profile & degraded-mode freeze
+  - backup / restore / disaster recovery rehearsal
+  - capacity baseline / load envelope / scaling policy
+  - audit export / retention / compliance handoff
+  - v1.0 RC / post-GA monitoring automation
 
 ## 2026-04-11 — v0.3.0 session runtime + distributed prototype
 

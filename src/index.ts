@@ -189,7 +189,7 @@ export async function createOrchestratorRuntime(
     eventBus,
     logIndex,
     startedAt,
-    version: options.version ?? '0.3.0',
+    version: options.version ?? '0.4.0',
     controlPlaneCoordinator,
   })
 

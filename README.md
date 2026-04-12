@@ -582,13 +582,21 @@ coreline-orchestrator/
 - remote worker plane 최소 계약은 `src/control/remotePlane.ts`에 고정되어 있고 dispatch/assignment fencing token을 포함한다
 - `stopRuntime()`은 **local executor drain**만 수행하고, `stopOrchestrator()`만 singleton global shutdown semantics를 유지한다
 
-### Next Roadmap ([dev-plan](dev-plan/implement_20260412_160606.md))
+### Current Roadmap ([dev-plan](dev-plan/implement_20260412_160606.md))
 
 - ✅ Phase 1: Production backend/provider contract freeze
 - ✅ Phase 2: Observability / SLI/SLO / alerting hardening
 - ✅ Phase 3: Executor identity / transport auth / secret rotation
 - ✅ Phase 4: Load / soak / chaos / canary automation
 - ✅ Phase 5: GA readiness / release gate / operator automation
+
+### Next Roadmap ([dev-plan](dev-plan/implement_20260412_190027.md))
+
+- 🔲 Phase 1: Provider cutover profile & degraded-mode freeze
+- 🔲 Phase 2: Backup / restore / disaster recovery rehearsal
+- 🔲 Phase 3: Capacity baseline / load envelope / scaling policy
+- 🔲 Phase 4: Audit export / retention / compliance handoff
+- 🔲 Phase 5: v1.0 RC / post-GA monitoring automation
 
 ---
 
@@ -627,6 +635,7 @@ coreline-orchestrator/
 | [`dev-plan/implement_20260412_075941.md`](dev-plan/implement_20260412_075941.md) | Full-test validation plan and verification record |
 | [`dev-plan/implement_20260412_084602.md`](dev-plan/implement_20260412_084602.md) | Follow-up manual/deep/Bun-probe verification plan |
 | [`dev-plan/implement_20260412_160606.md`](dev-plan/implement_20260412_160606.md) | Production operating-model roadmap (completed) |
+| [`dev-plan/implement_20260412_190027.md`](dev-plan/implement_20260412_190027.md) | Next post-GA production cutover roadmap |
 | [`CLAUDE.md`](CLAUDE.md) | AI agent project context |
 
 ---

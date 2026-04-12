@@ -56,7 +56,8 @@ bun run release:ga:check  # GA composed ship gate
 ## 다음 로드맵
 
 - 현재까지의 distributed/service follow-up, 운영 검증 후속, 그리고 production operating-model roadmap이 모두 완료되었다.
-- 기준 문서: `dev-plan/implement_20260412_160606.md`
+- 직전 완료 문서: `dev-plan/implement_20260412_160606.md`
+- 다음 기준 문서: `dev-plan/implement_20260412_190027.md`
 - 현재 ship gate는 `bun run release:ga:check` 이다.
 
 ## API 보안 규칙

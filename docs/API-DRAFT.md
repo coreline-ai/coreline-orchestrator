@@ -826,7 +826,7 @@ Behavior:
 ```json
 {
   "status": "ok",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "time": "2026-04-04T12:32:00Z"
 }
 ```

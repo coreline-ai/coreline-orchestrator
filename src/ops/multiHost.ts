@@ -119,7 +119,7 @@ export async function runMultiHostPrototype(
     stateRootDir,
     executorId: 'exec_alpha',
     hostId: 'host-alpha',
-    version: '0.3.0-multihost-prototype',
+    version: '0.4.0-multihost-prototype',
   })
   const runtimeB = await createOrchestratorRuntime({
     config,
@@ -128,7 +128,7 @@ export async function runMultiHostPrototype(
     stateRootDir,
     executorId: 'exec_beta',
     hostId: 'host-beta',
-    version: '0.3.0-multihost-prototype',
+    version: '0.4.0-multihost-prototype',
   })
 
   try {
@@ -286,7 +286,7 @@ export async function runDistributedWorkerPlanePrototype(
     stateRootDir,
     executorId: 'ctrl_main',
     hostId: 'control-host',
-    version: '0.3.0-distributed-prototype',
+    version: '0.4.0-distributed-prototype',
   })
   const alpha = new RemoteExecutorAgent({
     serviceUrl: config.distributedServiceUrl!,

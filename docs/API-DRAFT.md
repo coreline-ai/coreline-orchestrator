@@ -1077,3 +1077,10 @@ The adapter layer should absorb that complexity so external tools see a clean mo
 - logs,
 - results,
 - artifacts.
+
+
+## Distributed Readiness Surfaces
+
+- `GET /api/v1/distributed/providers` — backend/provider contract matrix
+- `GET /api/v1/distributed/cutover` — latency/error envelopes, canary policy, degraded-mode matrix
+- `GET /api/v1/distributed/readiness` — queue/executor/session alert summary

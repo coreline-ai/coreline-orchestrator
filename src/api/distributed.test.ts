@@ -151,6 +151,14 @@ describe('distributed routes', () => {
       'remote_executor_service_agent',
     ])
 
+    const cutoverResponse = await app.request('/api/v1/distributed/cutover')
+    expect(cutoverResponse.status).toBe(200)
+    const cutoverBody = (await cutoverResponse.json()) as {
+      profiles: Array<{ provider_id: string; canary: { entry_command: string } }>
+    }
+    expect(cutoverBody.profiles.some((entry) => entry.provider_id === 'http_service_coordinator')).toBe(true)
+    expect(cutoverBody.profiles[0]?.canary.entry_command).toContain('bun run')
+
     const readinessResponse = await app.request('/api/v1/distributed/readiness')
     expect(readinessResponse.status).toBe(200)
     const readinessBody = (await readinessResponse.json()) as {

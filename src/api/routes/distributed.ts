@@ -3,6 +3,7 @@ import { Hono } from 'hono'
 import type { OrchestratorConfig } from '../../config/config.js'
 import type { ControlPlaneCoordinator } from '../../control/coordination.js'
 import { buildDistributedReadinessReport } from '../../control/distributedReadiness.js'
+import { buildProviderCutoverPlan } from '../../control/cutoverProfiles.js'
 import { buildProviderContractMatrix } from '../../control/providerProfiles.js'
 import type { Scheduler } from '../../scheduler/scheduler.js'
 import type { SessionManager } from '../../sessions/sessionManager.js'
@@ -25,6 +26,11 @@ export function createDistributedRouter(
   app.get('/distributed/providers', (c) => {
     requireApiScope(c.req.raw, dependencies.config, 'system:read')
     return c.json(buildProviderContractMatrix(dependencies.config))
+  })
+
+  app.get('/distributed/cutover', (c) => {
+    requireApiScope(c.req.raw, dependencies.config, 'system:read')
+    return c.json(buildProviderCutoverPlan(dependencies.config))
   })
 
   app.get('/distributed/readiness', async (c) => {

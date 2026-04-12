@@ -45,7 +45,13 @@
     "ops:verify:distributed": "bun run ops:smoke:multihost:prototype && bun run ops:smoke:multihost:service",
     "release:v2:check": "bun run verify && bun run ops:verify:v2",
     "release:distributed:check": "bun run release:v2:check && bun run ops:verify:distributed",
-    "release:ga:check": "bun run release:distributed:check && bun run ops:verify:rc && bun run ops:smoke:real:preflight && bun run ops:readiness:ga"
+    "release:ga:check": "bun run release:distributed:check && bun run ops:verify:rc && bun run ops:smoke:real:preflight && bun run ops:readiness:ga",
+    "ops:providers:cutover": "bun ./scripts/run-provider-cutover.ts",
+    "ops:dr:plan": "bun ./scripts/run-disaster-recovery-plan.ts",
+    "ops:capacity:baseline": "bun ./scripts/run-capacity-baseline.ts",
+    "ops:audit:handoff": "bun ./scripts/run-audit-handoff.ts",
+    "ops:readiness:v1-rc": "bun ./scripts/run-v1-rc-readiness.ts",
+    "release:v1:check": "bun run release:ga:check && bun run ops:providers:cutover && bun run ops:dr:plan && bun run ops:capacity:baseline && bun run ops:audit:handoff && bun run ops:readiness:v1-rc"
   },
   "dependencies": {
     "hono": "4.12.10",

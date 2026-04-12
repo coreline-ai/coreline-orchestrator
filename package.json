@@ -24,10 +24,14 @@
     "ops:verify:deep:plan": "bun ./scripts/run-ops-deep-check.ts --mode plan",
     "ops:probe:soak:fixture": "bun ./scripts/run-ops-deep-check.ts --mode soak-lite --success-worker-binary ./scripts/fixtures/smoke-success-worker.sh --iterations 2",
     "ops:probe:fault:fixture": "bun ./scripts/run-ops-deep-check.ts --mode fault-lite --timeout-worker-binary ./scripts/fixtures/smoke-timeout-worker.sh",
+    "ops:probe:canary:distributed": "bun ./scripts/run-ops-deep-check.ts --mode canary-lite --success-worker-binary ./scripts/fixtures/smoke-success-worker.sh",
+    "ops:probe:chaos:distributed": "bun ./scripts/run-ops-deep-check.ts --mode chaos-lite --success-worker-binary ./scripts/fixtures/smoke-success-worker.sh",
     "ops:verify:deep": "bun ./scripts/run-ops-deep-check.ts --mode all --success-worker-binary ./scripts/fixtures/smoke-success-worker.sh --timeout-worker-binary ./scripts/fixtures/smoke-timeout-worker.sh --iterations 2",
     "ops:probe:bun-exit": "bun ./scripts/run-bun-exit-probe.ts",
     "ops:probe:bun-exit:migration": "bun ./scripts/run-bun-exit-probe.ts --target migration-dry-run",
     "ops:verify:deep:weekly": "bun run ops:verify:deep && bun run ops:probe:bun-exit && bun run ops:probe:bun-exit:migration",
+    "ops:verify:rc": "bun ./scripts/run-ops-deep-check.ts --mode release-candidate --success-worker-binary ./scripts/fixtures/smoke-success-worker.sh --timeout-worker-binary ./scripts/fixtures/smoke-timeout-worker.sh --iterations 2",
+    "ops:readiness:ga": "bun ./scripts/run-ga-readiness.ts",
     "start": "bun dist/index.js",
     "test": "bun test",
     "verify": "bun run check:release-hygiene && bun test && bun run typecheck && bun run build",
@@ -40,7 +44,8 @@
     "ops:verify:v2": "bun run ops:smoke:fixture && bun run ops:smoke:timeout:fixture && bun run ops:smoke:v2:session:fixture && bun run ops:migrate:dry-run",
     "ops:verify:distributed": "bun run ops:smoke:multihost:prototype && bun run ops:smoke:multihost:service",
     "release:v2:check": "bun run verify && bun run ops:verify:v2",
-    "release:distributed:check": "bun run release:v2:check && bun run ops:verify:distributed"
+    "release:distributed:check": "bun run release:v2:check && bun run ops:verify:distributed",
+    "release:ga:check": "bun run release:distributed:check && bun run ops:verify:rc && bun run ops:smoke:real:preflight && bun run ops:readiness:ga"
   },
   "dependencies": {
     "hono": "4.12.10",

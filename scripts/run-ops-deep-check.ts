@@ -23,7 +23,15 @@ function parseArgs(argv: string[]): ParsedArgs {
     const argument = argv[index]
     if (argument === '--mode') {
       const rawMode = argv[index + 1]
-      if (rawMode === 'plan' || rawMode === 'soak-lite' || rawMode === 'fault-lite' || rawMode === 'all') {
+      if (
+        rawMode === 'plan' ||
+        rawMode === 'soak-lite' ||
+        rawMode === 'fault-lite' ||
+        rawMode === 'canary-lite' ||
+        rawMode === 'chaos-lite' ||
+        rawMode === 'all' ||
+        rawMode === 'release-candidate'
+      ) {
         mode = rawMode
       }
       index += 1

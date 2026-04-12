@@ -1,8 +1,31 @@
-import { runSmokeScenario, type RunSmokeScenarioOptions, type SmokeScenarioResult } from './smoke.js'
+import {
+  runDistributedWorkerPlanePrototype,
+  runMultiHostPrototype,
+  type DistributedWorkerPlaneResult,
+  type RunMultiHostPrototypeOptions,
+  type MultiHostPrototypeResult,
+} from './multiHost.js'
+import {
+  runSmokeScenario,
+  type RunSmokeScenarioOptions,
+  type SmokeScenarioResult,
+} from './smoke.js'
 
-export type DeepVerificationCategory = 'performance' | 'soak' | 'fault_injection'
+export type DeepVerificationCategory =
+  | 'performance'
+  | 'soak'
+  | 'fault_injection'
+  | 'canary'
+  | 'chaos'
 export type DeepVerificationAutomation = 'fixture_harness' | 'manual' | 'semi_manual'
-export type DeepVerificationMode = 'plan' | 'soak-lite' | 'fault-lite' | 'all'
+export type DeepVerificationMode =
+  | 'plan'
+  | 'soak-lite'
+  | 'fault-lite'
+  | 'canary-lite'
+  | 'chaos-lite'
+  | 'all'
+  | 'release-candidate'
 
 export interface DeepVerificationScenarioDefinition {
   id: string
@@ -36,11 +59,30 @@ export interface FaultLiteProbeResult {
   duration_ms: number
 }
 
+export interface CanaryLiteProbeResult {
+  first_job_status: string
+  second_job_status: string
+  artifact_transport: string
+  result_transport: string
+  registered_executors: string[]
+  remote_failover_observed: boolean
+}
+
+export interface ChaosLiteProbeResult {
+  first_job_status: string
+  second_job_status: string
+  lease_owner_before_failover: string | null
+  lease_owner_after_failover: string | null
+  lease_failover_observed: boolean
+}
+
 export interface DeepVerificationHarnessResult {
   mode: DeepVerificationMode
   matrix: DeepVerificationScenarioDefinition[]
   soak_lite: SoakLiteProbeResult | null
   fault_lite: FaultLiteProbeResult | null
+  canary_lite: CanaryLiteProbeResult | null
+  chaos_lite: ChaosLiteProbeResult | null
 }
 
 export const DEEP_VERIFICATION_MATRIX: DeepVerificationScenarioDefinition[] = [
@@ -69,6 +111,30 @@ export const DEEP_VERIFICATION_MATRIX: DeepVerificationScenarioDefinition[] = [
     ],
   },
   {
+    id: 'distributed-service-canary-lite',
+    category: 'canary',
+    automation: 'fixture_harness',
+    command: 'bun run ops:probe:canary:distributed',
+    objective: 'Exercise the service-backed coordinator, event, object-store, and remote executor path before a candidate release.',
+    successCriteria: [
+      'remote failover is observed between executors',
+      'remote artifact/result transports remain manifest-readable',
+      'service-backed worker-plane completes two jobs without operator repair',
+    ],
+  },
+  {
+    id: 'distributed-failover-chaos-lite',
+    category: 'chaos',
+    automation: 'fixture_harness',
+    command: 'bun run ops:probe:chaos:distributed',
+    objective: 'Repeat lease takeover and assignment failover on the shared coordinator path to validate degraded-mode convergence.',
+    successCriteria: [
+      'dispatch lease changes owners after leader shutdown',
+      'second runtime completes dispatch after takeover',
+      'assignment fencing remains monotonic during failover',
+    ],
+  },
+  {
     id: 'coordinator-failover-manual',
     category: 'performance',
     automation: 'semi_manual',
@@ -86,25 +152,44 @@ export type SmokeRunner = (
   options: RunSmokeScenarioOptions,
 ) => Promise<SmokeScenarioResult>
 
+export type CanaryRunner = (
+  options: RunMultiHostPrototypeOptions,
+) => Promise<DistributedWorkerPlaneResult>
+
+export type ChaosRunner = (
+  options: RunMultiHostPrototypeOptions,
+) => Promise<MultiHostPrototypeResult>
+
+export interface DeepVerificationHarnessDependencies {
+  smokeRunner?: SmokeRunner
+  canaryRunner?: CanaryRunner
+  chaosRunner?: ChaosRunner
+}
+
 export async function runDeepVerificationHarness(
   options: DeepVerificationHarnessOptions,
-  smokeRunner: SmokeRunner = runSmokeScenario,
+  dependencies: DeepVerificationHarnessDependencies = {},
 ): Promise<DeepVerificationHarnessResult> {
   const mode = options.mode
   const iterations = Math.max(1, options.iterations ?? 2)
+  const smokeRunner = dependencies.smokeRunner ?? runSmokeScenario
+  const canaryRunner = dependencies.canaryRunner ?? runDistributedWorkerPlanePrototype
+  const chaosRunner = dependencies.chaosRunner ?? runMultiHostPrototype
 
   const result: DeepVerificationHarnessResult = {
     mode,
     matrix: DEEP_VERIFICATION_MATRIX,
     soak_lite: null,
     fault_lite: null,
+    canary_lite: null,
+    chaos_lite: null,
   }
 
   if (mode === 'plan') {
     return result
   }
 
-  if (mode === 'soak-lite' || mode === 'all') {
+  if (mode === 'soak-lite' || mode === 'all' || mode === 'release-candidate') {
     result.soak_lite = await runSoakLiteProbe(
       {
         iterations,
@@ -114,12 +199,36 @@ export async function runDeepVerificationHarness(
     )
   }
 
-  if (mode === 'fault-lite' || mode === 'all') {
+  if (mode === 'fault-lite' || mode === 'all' || mode === 'release-candidate') {
     result.fault_lite = await runFaultLiteProbe(
       {
         workerBinary: options.timeoutWorkerBinary ?? './scripts/fixtures/smoke-timeout-worker.sh',
       },
       smokeRunner,
+    )
+  }
+
+  if (
+    mode === 'canary-lite' ||
+    mode === 'all' ||
+    mode === 'release-candidate'
+  ) {
+    result.canary_lite = await runCanaryLiteProbe(
+      {
+        workerBinary:
+          options.successWorkerBinary ?? './scripts/fixtures/smoke-success-worker.sh',
+      },
+      canaryRunner,
+    )
+  }
+
+  if (mode === 'chaos-lite' || mode === 'all' || mode === 'release-candidate') {
+    result.chaos_lite = await runChaosLiteProbe(
+      {
+        workerBinary:
+          options.successWorkerBinary ?? './scripts/fixtures/smoke-success-worker.sh',
+      },
+      chaosRunner,
     )
   }
 
@@ -184,5 +293,40 @@ async function runFaultLiteProbe(
     worker_status: result.workerStatus,
     worker_result_status: result.jobResult.worker_results[0]?.status ?? null,
     duration_ms: Date.now() - startedAt,
+  }
+}
+
+async function runCanaryLiteProbe(
+  options: { workerBinary: string },
+  canaryRunner: CanaryRunner,
+): Promise<CanaryLiteProbeResult> {
+  const result = await canaryRunner({
+    workerBinary: options.workerBinary,
+  })
+
+  return {
+    first_job_status: result.first_job.job_status,
+    second_job_status: result.second_job.job_status,
+    artifact_transport: result.artifact_transport,
+    result_transport: result.result_transport,
+    registered_executors: result.registered_executors,
+    remote_failover_observed: result.remote_failover_observed,
+  }
+}
+
+async function runChaosLiteProbe(
+  options: { workerBinary: string },
+  chaosRunner: ChaosRunner,
+): Promise<ChaosLiteProbeResult> {
+  const result = await chaosRunner({
+    workerBinary: options.workerBinary,
+  })
+
+  return {
+    first_job_status: result.first_job.job_status,
+    second_job_status: result.second_job.job_status,
+    lease_owner_before_failover: result.lease_owner_before_failover,
+    lease_owner_after_failover: result.lease_owner_after_failover,
+    lease_failover_observed: result.lease_failover_observed,
   }
 }

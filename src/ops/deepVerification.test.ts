@@ -3,6 +3,9 @@ import { describe, expect, test } from 'bun:test'
 import {
   DEEP_VERIFICATION_MATRIX,
   runDeepVerificationHarness,
+  type CanaryRunner,
+  type ChaosRunner,
+  type DeepVerificationHarnessDependencies,
   type SmokeRunner,
 } from './deepVerification.js'
 import { JobStatus, WorkerStatus } from '../core/models.js'
@@ -14,6 +17,8 @@ describe('deep verification harness', () => {
     expect(categories.has('soak')).toBe(true)
     expect(categories.has('fault_injection')).toBe(true)
     expect(categories.has('performance')).toBe(true)
+    expect(categories.has('canary')).toBe(true)
+    expect(categories.has('chaos')).toBe(true)
   })
 
   test('plan mode returns only the matrix', async () => {
@@ -22,9 +27,11 @@ describe('deep verification harness', () => {
     expect(result.matrix.length).toBeGreaterThanOrEqual(3)
     expect(result.soak_lite).toBeNull()
     expect(result.fault_lite).toBeNull()
+    expect(result.canary_lite).toBeNull()
+    expect(result.chaos_lite).toBeNull()
   })
 
-  test('all mode executes soak and fault probes through the injected runner', async () => {
+  test('release-candidate mode executes soak, fault, canary, and chaos probes through injected runners', async () => {
     const fakeRunner: SmokeRunner = async (options) => ({
       scenario: options.scenario ?? 'success',
       workerModeLabel: options.workerModeLabel ?? 'fixture',
@@ -85,13 +92,98 @@ describe('deep verification harness', () => {
       realtime: null,
     })
 
+    const fakeCanaryRunner: CanaryRunner = async () => ({
+      service_url: 'http://127.0.0.1:4001',
+      repo_path: '/tmp/repo',
+      state_root_dir: '/tmp/state',
+      first_job: {
+        job_id: 'job_canary_1',
+        worker_id: 'wrk_canary_1',
+        job_status: JobStatus.Completed,
+        worker_status: WorkerStatus.Finished,
+        executor_id: 'remote_alpha',
+        result_summary: 'ok-1',
+      },
+      second_job: {
+        job_id: 'job_canary_2',
+        worker_id: 'wrk_canary_2',
+        job_status: JobStatus.Completed,
+        worker_status: WorkerStatus.Finished,
+        executor_id: 'remote_beta',
+        result_summary: 'ok-2',
+      },
+      registered_executors: ['remote_alpha', 'remote_beta'],
+      artifact_transport: 'object_store_service',
+      result_transport: 'object_store_service',
+      remote_failover_observed: true,
+    })
+
+    const fakeChaosRunner: ChaosRunner = async () => ({
+      strategy: 'lease_based_single_leader',
+      root_dir: '/tmp/root',
+      repo_path: '/tmp/repo',
+      state_root_dir: '/tmp/state',
+      first_job: {
+        job_id: 'job_chaos_1',
+        worker_id: 'wrk_chaos_1',
+        job_status: JobStatus.Completed,
+        worker_status: WorkerStatus.Finished,
+        executor_id: 'exec_alpha',
+        result_summary: 'ok-1',
+      },
+      second_job: {
+        job_id: 'job_chaos_2',
+        worker_id: 'wrk_chaos_2',
+        job_status: JobStatus.Completed,
+        worker_status: WorkerStatus.Finished,
+        executor_id: 'exec_beta',
+        result_summary: 'ok-2',
+      },
+      executors_before_failover: [],
+      executors_after_failover: [],
+      lease_owner_before_failover: 'exec_alpha',
+      lease_owner_after_failover: 'exec_beta',
+      lease_failover_observed: true,
+      remote_worker_plane: {
+        job_claim: {
+          workerId: 'wrk_chaos_2',
+          jobId: 'job_chaos_2',
+          repoPath: '/tmp/repo',
+          prompt: 'Run after lease failover',
+          executionMode: 'process',
+          capabilityClass: 'read_only',
+          logPath: '/tmp/log.ndjson',
+          artifactTransport: 'object_store_manifest',
+          resultTransport: 'shared_state_store',
+        },
+        worker_heartbeat: {
+          worker_id: 'wrk_chaos_2',
+          executor_id: 'exec_beta',
+          status: 'active',
+        },
+        result_publish: {
+          worker_id: 'wrk_chaos_2',
+          executor_id: 'exec_beta',
+          result_summary: 'ok-2',
+        },
+      },
+    })
+
+    const dependencies: DeepVerificationHarnessDependencies = {
+      smokeRunner: fakeRunner,
+      canaryRunner: fakeCanaryRunner,
+      chaosRunner: fakeChaosRunner,
+    }
+
     const result = await runDeepVerificationHarness(
-      { mode: 'all', iterations: 2 },
-      fakeRunner,
+      { mode: 'release-candidate', iterations: 2 },
+      dependencies,
     )
 
     expect(result.soak_lite?.iterations).toBe(2)
     expect(result.soak_lite?.failure_count).toBe(0)
     expect(result.fault_lite?.worker_result_status).toBe('timed_out')
+    expect(result.canary_lite?.remote_failover_observed).toBe(true)
+    expect(result.chaos_lite?.lease_failover_observed).toBe(true)
   })
 })

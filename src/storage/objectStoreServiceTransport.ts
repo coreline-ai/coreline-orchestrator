@@ -1,21 +1,25 @@
 import { readFile } from 'node:fs/promises'
 
+import { createDistributedServiceAuthHeaders } from '../api/internalAuth.js'
 import type { ObjectStoreManifest } from './manifestTransport.js'
 
 interface ObjectStoreServiceTransportOptions {
   baseUrl: string
   token: string
+  tokenId?: string
 }
 
 export class ObjectStoreServiceTransport {
   readonly #baseUrl: string
   readonly #token: string
+  readonly #tokenId: string | undefined
 
   constructor(options: ObjectStoreServiceTransportOptions) {
     this.#baseUrl = options.baseUrl.endsWith('/')
       ? options.baseUrl
       : `${options.baseUrl}/`
     this.#token = options.token
+    this.#tokenId = options.tokenId
   }
 
   async publishFile(input: {
@@ -82,7 +86,10 @@ export class ObjectStoreServiceTransport {
     const response = await fetch(new URL(path, this.#baseUrl), {
       method: init.method ?? 'GET',
       headers: {
-        authorization: `Bearer ${this.#token}`,
+        ...createDistributedServiceAuthHeaders({
+          token: this.#token,
+          tokenId: this.#tokenId ?? 'distributed-shared',
+        }),
         accept: 'application/json',
         ...(init.body === undefined ? {} : { 'content-type': 'application/json' }),
       },

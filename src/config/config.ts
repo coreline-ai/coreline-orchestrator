@@ -4,6 +4,7 @@ import { InvalidConfigurationError } from '../core/errors.js'
 export type ApiExposureMode = 'trusted_local' | 'untrusted_network'
 export type StateStoreBackend = 'file' | 'sqlite'
 export type ApiPrincipalActorType = 'operator' | 'service'
+export type DistributedServicePrincipalActorType = 'service' | 'executor'
 export type ControlPlaneBackend = 'memory' | 'sqlite' | 'service'
 export type DispatchQueueBackend = 'memory' | 'sqlite'
 export type EventStreamBackend =
@@ -27,6 +28,16 @@ export interface ApiAuthTokenConfig {
   sessionIds?: string[]
 }
 
+export interface DistributedServiceAuthTokenConfig {
+  tokenId: string
+  token: string
+  subject: string
+  actorType: DistributedServicePrincipalActorType
+  scopes: string[]
+  notBefore?: string
+  expiresAt?: string
+}
+
 export interface OrchestratorConfig {
   apiHost: string
   apiPort: number
@@ -35,6 +46,8 @@ export interface OrchestratorConfig {
   apiAuthTokens?: ApiAuthTokenConfig[]
   distributedServiceUrl?: string
   distributedServiceToken?: string
+  distributedServiceTokenId?: string
+  distributedServiceTokens?: DistributedServiceAuthTokenConfig[]
   controlPlaneBackend: ControlPlaneBackend
   controlPlaneSqlitePath?: string
   dispatchQueueBackend: DispatchQueueBackend
@@ -52,6 +65,10 @@ export interface OrchestratorConfig {
   defaultTimeoutSeconds: number
   workerBinary: string
   workerMode: ExecutionMode
+  distributedAlertMaxQueueDepth?: number
+  distributedAlertMaxStaleExecutors?: number
+  distributedAlertMaxStaleAssignments?: number
+  distributedAlertMaxStuckSessions?: number
 }
 
 const defaultConfig: OrchestratorConfig = {
@@ -60,6 +77,8 @@ const defaultConfig: OrchestratorConfig = {
   apiExposure: 'trusted_local',
   distributedServiceUrl: undefined,
   distributedServiceToken: undefined,
+  distributedServiceTokenId: undefined,
+  distributedServiceTokens: [],
   controlPlaneBackend: 'memory',
   dispatchQueueBackend: 'memory',
   eventStreamBackend: 'memory',
@@ -93,6 +112,12 @@ export function loadConfig(
     ),
     distributedServiceToken: normalizeOptionalString(
       env.ORCH_DISTRIBUTED_SERVICE_TOKEN,
+    ),
+    distributedServiceTokenId: normalizeOptionalString(
+      env.ORCH_DISTRIBUTED_SERVICE_TOKEN_ID,
+    ),
+    distributedServiceTokens: parseDistributedServiceAuthTokens(
+      env.ORCH_DISTRIBUTED_SERVICE_TOKENS,
     ),
     controlPlaneBackend: parseControlPlaneBackend(
       env.ORCH_CONTROL_BACKEND,
@@ -145,6 +170,18 @@ export function loadConfig(
       env.ORCH_WORKER_MODE,
       defaultConfig.workerMode,
     ),
+    distributedAlertMaxQueueDepth: parseOptionalPositiveInteger(
+      env.ORCH_ALERT_MAX_QUEUE_DEPTH,
+    ),
+    distributedAlertMaxStaleExecutors: parseOptionalPositiveInteger(
+      env.ORCH_ALERT_MAX_STALE_EXECUTORS,
+    ),
+    distributedAlertMaxStaleAssignments: parseOptionalPositiveInteger(
+      env.ORCH_ALERT_MAX_STALE_ASSIGNMENTS,
+    ),
+    distributedAlertMaxStuckSessions: parseOptionalPositiveInteger(
+      env.ORCH_ALERT_MAX_STUCK_SESSIONS,
+    ),
   }
 }
 
@@ -169,11 +206,11 @@ export function assertSafeApiConfig(config: OrchestratorConfig): void {
   if (
     distributedServiceRequired &&
     (normalizeOptionalString(config.distributedServiceUrl) === undefined ||
-      normalizeOptionalString(config.distributedServiceToken) === undefined)
+      resolvePrimaryDistributedServiceCredential(config) === undefined)
   ) {
     throw new InvalidConfigurationError(
       'ORCH_DISTRIBUTED_SERVICE_URL',
-      'Distributed service backends require ORCH_DISTRIBUTED_SERVICE_URL and ORCH_DISTRIBUTED_SERVICE_TOKEN.',
+      'Distributed service backends require ORCH_DISTRIBUTED_SERVICE_URL and a primary distributed service credential.',
     )
   }
 }
@@ -189,6 +226,21 @@ function parsePositiveInteger(
   const parsed = Number.parseInt(rawValue, 10)
   if (!Number.isFinite(parsed) || parsed <= 0) {
     return fallback
+  }
+
+  return parsed
+}
+
+function parseOptionalPositiveInteger(
+  rawValue: string | undefined,
+): number | undefined {
+  if (rawValue === undefined || rawValue.trim() === '') {
+    return undefined
+  }
+
+  const parsed = Number.parseInt(rawValue, 10)
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return undefined
   }
 
   return parsed
@@ -300,6 +352,68 @@ function parseApiAuthTokens(
       ...(repoPaths === undefined ? {} : { repoPaths }),
       ...(jobIds === undefined ? {} : { jobIds }),
       ...(sessionIds === undefined ? {} : { sessionIds }),
+    }
+  })
+}
+
+function parseDistributedServiceAuthTokens(
+  rawValue: string | undefined,
+): DistributedServiceAuthTokenConfig[] {
+  const normalized = normalizeOptionalString(rawValue)
+  if (normalized === undefined) {
+    return []
+  }
+
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(normalized)
+  } catch {
+    throw new InvalidConfigurationError(
+      'ORCH_DISTRIBUTED_SERVICE_TOKENS',
+      'ORCH_DISTRIBUTED_SERVICE_TOKENS must be valid JSON.',
+    )
+  }
+
+  if (!Array.isArray(parsed)) {
+    throw new InvalidConfigurationError(
+      'ORCH_DISTRIBUTED_SERVICE_TOKENS',
+      'ORCH_DISTRIBUTED_SERVICE_TOKENS must be a JSON array.',
+    )
+  }
+
+  return parsed.map((entry, index) => {
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
+      throw new InvalidConfigurationError(
+        'ORCH_DISTRIBUTED_SERVICE_TOKENS',
+        `Distributed token entry ${index} must be an object.`,
+      )
+    }
+
+    const tokenId = normalizeOptionalString(readStringField(entry, 'token_id'))
+    const token = normalizeOptionalString(readStringField(entry, 'token'))
+    const subject =
+      normalizeOptionalString(readStringField(entry, 'subject')) ??
+      tokenId
+    const actorType = readDistributedActorType(entry)
+    const scopes = readStringArrayField(entry, 'scopes')
+    const notBefore = normalizeOptionalString(readStringField(entry, 'not_before'))
+    const expiresAt = normalizeOptionalString(readStringField(entry, 'expires_at'))
+
+    if (tokenId === undefined || token === undefined || subject === undefined) {
+      throw new InvalidConfigurationError(
+        'ORCH_DISTRIBUTED_SERVICE_TOKENS',
+        `Distributed token entry ${index} requires token_id, token, and subject/token_id.`,
+      )
+    }
+
+    return {
+      tokenId,
+      token,
+      subject,
+      actorType,
+      scopes: scopes.length === 0 ? ['*'] : scopes,
+      ...(notBefore === undefined ? {} : { notBefore }),
+      ...(expiresAt === undefined ? {} : { expiresAt }),
     }
   })
 }
@@ -418,6 +532,15 @@ function readActorType(
     : 'service'
 }
 
+function readDistributedActorType(
+  value: Record<string, unknown>,
+): DistributedServicePrincipalActorType {
+  const rawValue = value.actor_type
+  return rawValue === 'service' || rawValue === 'executor'
+    ? rawValue
+    : 'service'
+}
+
 function parseExecutionMode(
   rawValue: string | undefined,
   fallback: ExecutionMode,
@@ -431,4 +554,33 @@ function parseExecutionMode(
   }
 
   return fallback
+}
+
+export function resolvePrimaryDistributedServiceCredential(
+  config: Pick<
+    OrchestratorConfig,
+    'distributedServiceToken' | 'distributedServiceTokenId' | 'distributedServiceTokens'
+  >,
+): DistributedServiceAuthTokenConfig | undefined {
+  const sharedToken = normalizeOptionalString(config.distributedServiceToken)
+  if (sharedToken !== undefined) {
+    return {
+      tokenId: config.distributedServiceTokenId ?? 'distributed-shared',
+      token: sharedToken,
+      subject: 'distributed-shared',
+      actorType: 'service',
+      scopes: ['*'],
+    }
+  }
+
+  const namedTokens = config.distributedServiceTokens ?? []
+  if (namedTokens.length === 0) {
+    return undefined
+  }
+
+  if (config.distributedServiceTokenId !== undefined) {
+    return namedTokens.find((entry) => entry.tokenId === config.distributedServiceTokenId)
+  }
+
+  return namedTokens.length === 1 ? namedTokens[0] : undefined
 }

@@ -418,6 +418,8 @@ export class Scheduler {
           workerId: claimedWorker.workerId,
           jobId: claimedWorker.jobId,
           dispatchFencingToken: lease.fencingToken,
+          assignmentFencingToken:
+            claimedWorker.metadata?.remoteAssignmentFencingToken,
           repoPath: claimedWorker.repoPath,
           prompt,
           executionMode: claimedWorker.runtimeMode,

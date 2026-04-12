@@ -2,6 +2,7 @@ import { mkdtemp, mkdir, readFile, rm } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 
+import { createDistributedServiceAuthHeaders } from '../api/internalAuth.js'
 import type { ExecutionMode, WorkerCapabilityClass } from '../core/models.js'
 import { LogCollector } from '../logs/logCollector.js'
 import { ProcessRuntimeAdapter } from '../runtime/processRuntimeAdapter.js'
@@ -18,6 +19,7 @@ import { ServiceControlPlaneCoordinator } from './serviceCoordinator.js'
 interface RemoteExecutorAgentOptions {
   serviceUrl: string
   serviceToken: string
+  serviceTokenId?: string
   executorId: string
   hostId: string
   workerBinary: string
@@ -60,6 +62,8 @@ export class RemoteExecutorAgent {
       apiAuthTokens: [],
       distributedServiceUrl: options.serviceUrl,
       distributedServiceToken: options.serviceToken,
+      distributedServiceTokenId: options.serviceTokenId,
+      distributedServiceTokens: [],
       controlPlaneBackend: 'service',
       controlPlaneSqlitePath: undefined,
       dispatchQueueBackend: 'sqlite',
@@ -81,10 +85,12 @@ export class RemoteExecutorAgent {
     this.#controlPlane = new ServiceControlPlaneCoordinator({
       baseUrl: options.serviceUrl,
       token: options.serviceToken,
+      tokenId: options.serviceTokenId,
     })
     this.#objectStoreTransport = new ObjectStoreServiceTransport({
       baseUrl: options.serviceUrl,
       token: options.serviceToken,
+      tokenId: options.serviceTokenId,
     })
   }
 
@@ -258,7 +264,7 @@ export class RemoteExecutorAgent {
           workerId: claim.workerId,
           jobId: claim.jobId,
           executorId: this.#options.executorId,
-          assignmentFencingToken: undefined,
+          assignmentFencingToken: claim.assignmentFencingToken,
           status: determineExecutionStatus(exitResult.exitCode, handle.timedOut),
           summary,
           resultPath: publishedResultPath,
@@ -287,7 +293,7 @@ export class RemoteExecutorAgent {
         workerId: claim.workerId,
         jobId: claim.jobId,
         executorId: this.#options.executorId,
-        assignmentFencingToken: undefined,
+        assignmentFencingToken: claim.assignmentFencingToken,
         timestamp: new Date().toISOString(),
         status,
       },
@@ -329,7 +335,10 @@ export class RemoteExecutorAgent {
     const response = await fetch(new URL(path, this.#options.serviceUrl), {
       method: init.method ?? 'GET',
       headers: {
-        authorization: `Bearer ${this.#options.serviceToken}`,
+        ...createDistributedServiceAuthHeaders({
+          token: this.#options.serviceToken,
+          tokenId: this.#options.serviceTokenId ?? 'distributed-shared',
+        }),
         accept: 'application/json',
         ...(init.body === undefined ? {} : { 'content-type': 'application/json' }),
       },

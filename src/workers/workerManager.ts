@@ -1,6 +1,7 @@
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 
 import type { OrchestratorConfig } from '../config/config.js'
+import { resolvePrimaryDistributedServiceCredential } from '../config/config.js'
 import type { ControlPlaneCoordinator } from '../control/coordination.js'
 import type {
   RemoteWorkerHeartbeatEnvelope,
@@ -27,6 +28,7 @@ import {
   isTerminalWorkerStatus,
 } from '../core/stateMachine.js'
 import {
+  FencingTokenMismatchError,
   JobNotFoundError,
   OrchestratorError,
   SessionTransportUnavailableError,
@@ -334,7 +336,7 @@ export class WorkerManager {
     const job = await this.#getRequiredJob(worker.jobId)
     const now = new Date().toISOString()
 
-    const claimedWorker: WorkerRecord =
+    let claimedWorker: WorkerRecord =
       worker.status === WorkerStatus.Created
         ? {
             ...worker,
@@ -358,6 +360,28 @@ export class WorkerManager {
             },
           }
 
+    if (this.#controlPlane !== undefined) {
+      const assignment = await this.#controlPlane.coordinator.upsertWorkerHeartbeat({
+        workerId: claimedWorker.workerId,
+        jobId: claimedWorker.jobId,
+        executorId,
+        repoPath: claimedWorker.repoPath,
+        ttlMs: this.#controlPlane.heartbeatTtlMs ?? 5_000,
+        now,
+        metadata: {
+          runtimeMode: claimedWorker.runtimeMode,
+          heartbeatStatus: 'claimed',
+        },
+      })
+      claimedWorker = {
+        ...claimedWorker,
+        metadata: {
+          ...claimedWorker.metadata,
+          remoteAssignmentFencingToken: assignment.fencingToken,
+        },
+      }
+    }
+
     await this.#stateStore.updateWorker(claimedWorker)
     await this.#advanceJobToStatus(job, JobStatus.Dispatching)
     await this.#publishEvent(
@@ -379,6 +403,10 @@ export class WorkerManager {
     envelope: RemoteWorkerHeartbeatEnvelope,
   ): Promise<WorkerRecord> {
     const worker = await this.#getRequiredWorker(envelope.workerId)
+    this.#assertRemoteAssignmentFencingToken(
+      worker,
+      envelope.assignmentFencingToken,
+    )
     const now = envelope.timestamp
     const targetStatus =
       envelope.status === 'active'
@@ -458,6 +486,10 @@ export class WorkerManager {
     envelope: RemoteWorkerResultEnvelope,
   ): Promise<WorkerRecord> {
     const worker = await this.#getRequiredWorker(envelope.workerId)
+    this.#assertRemoteAssignmentFencingToken(
+      worker,
+      envelope.assignmentFencingToken,
+    )
     if (isTerminalWorkerStatus(worker.status)) {
       return worker
     }
@@ -569,6 +601,27 @@ export class WorkerManager {
 
     await this.#queueJobAggregation(terminalWorker.jobId)
     return terminalWorker
+  }
+
+  #assertRemoteAssignmentFencingToken(
+    worker: WorkerRecord,
+    receivedToken: string | undefined,
+  ): void {
+    const expectedToken = worker.metadata?.remoteAssignmentFencingToken
+    if (expectedToken === undefined || expectedToken === '') {
+      return
+    }
+
+    if (receivedToken === expectedToken) {
+      return
+    }
+
+    throw new FencingTokenMismatchError(
+      'worker_assignment',
+      worker.workerId,
+      expectedToken,
+      receivedToken,
+    )
   }
 
   async attachSessionRuntime(
@@ -1706,14 +1759,18 @@ export class WorkerManager {
     kind: string,
     createdAt: string,
   ): Promise<string> {
+    const distributedCredential = resolvePrimaryDistributedServiceCredential(
+      this.#config,
+    )
     if (
       this.#config.artifactTransportMode === 'object_store_service' &&
       this.#config.distributedServiceUrl !== undefined &&
-      this.#config.distributedServiceToken !== undefined
+      distributedCredential !== undefined
     ) {
       const manifest = await new ObjectStoreServiceTransport({
         baseUrl: this.#config.distributedServiceUrl,
-        token: this.#config.distributedServiceToken,
+        token: distributedCredential.token,
+        tokenId: distributedCredential.tokenId,
       }).publishFile({
         repoPath,
         orchestratorRootDir: this.#config.orchestratorRootDir,

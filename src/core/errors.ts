@@ -15,7 +15,13 @@ export class OrchestratorError extends Error {
 }
 
 export class AuthenticationRequiredError extends OrchestratorError {
-  constructor(reason: 'missing_token' | 'invalid_token' = 'missing_token') {
+  constructor(
+    reason:
+      | 'missing_token'
+      | 'invalid_token'
+      | 'stale_token'
+      | 'scope_denied' = 'missing_token',
+  ) {
     super('AUTHENTICATION_REQUIRED', 'Valid API authentication is required.', {
       reason,
     })
@@ -182,5 +188,25 @@ export class TimeoutExceededError extends OrchestratorError {
       workerId,
       timeoutSeconds,
     })
+  }
+}
+
+export class FencingTokenMismatchError extends OrchestratorError {
+  constructor(
+    resourceKind: 'lease' | 'worker_assignment',
+    resourceId: string,
+    expectedToken: string | undefined,
+    receivedToken: string | undefined,
+  ) {
+    super(
+      'FENCING_TOKEN_MISMATCH',
+      `Fencing token mismatch for ${resourceKind} ${resourceId}.`,
+      {
+        resourceKind,
+        resourceId,
+        expectedToken: expectedToken ?? null,
+        receivedToken: receivedToken ?? null,
+      },
+    )
   }
 }

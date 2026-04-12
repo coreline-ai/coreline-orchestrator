@@ -1,6 +1,7 @@
 import { isAbsolute, join, resolve } from 'node:path'
 
 import type { ControlPlaneBackend } from '../config/config.js'
+import { resolvePrimaryDistributedServiceCredential } from '../config/config.js'
 import { InMemoryControlPlaneCoordinator } from './coordination.js'
 import { ServiceControlPlaneCoordinator } from './serviceCoordinator.js'
 import { SqliteControlPlaneCoordinator } from './sqliteCoordinator.js'
@@ -11,17 +12,24 @@ export function createControlPlaneCoordinator(
     controlPlaneSqlitePath?: string
     distributedServiceUrl?: string
     distributedServiceToken?: string
+    distributedServiceTokenId?: string
+    distributedServiceTokens?: import('../config/config.js').DistributedServiceAuthTokenConfig[]
   },
   rootDir: string,
 ) {
   if (
     config.controlPlaneBackend === 'service' &&
-    config.distributedServiceUrl !== undefined &&
-    config.distributedServiceToken !== undefined
+    config.distributedServiceUrl !== undefined
   ) {
+    const credential = resolvePrimaryDistributedServiceCredential(config)
+    if (credential === undefined) {
+      return new InMemoryControlPlaneCoordinator()
+    }
+
     return new ServiceControlPlaneCoordinator({
       baseUrl: config.distributedServiceUrl,
-      token: config.distributedServiceToken,
+      token: credential.token,
+      tokenId: credential.tokenId,
     })
   }
 

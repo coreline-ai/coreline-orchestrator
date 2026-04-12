@@ -7,7 +7,12 @@ import type {
   AuditResourceKind,
 } from '../core/audit.js'
 import type { StateStore } from '../storage/types.js'
-import type { ApiAuthPrincipal } from './auth.js'
+
+export interface AuditPrincipalLike {
+  subject: string
+  actorType: 'operator' | 'service' | 'executor'
+  tokenId: string
+}
 
 export interface AuditRecorderDependencies {
   stateStore: StateStore
@@ -15,7 +20,7 @@ export interface AuditRecorderDependencies {
 }
 
 export interface AppendAuditEventInput {
-  principal: ApiAuthPrincipal | null
+  principal: AuditPrincipalLike | null
   action: string
   requiredScope: string
   resourceKind: AuditResourceKind

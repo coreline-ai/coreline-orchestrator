@@ -22,6 +22,7 @@ export interface RemoteJobClaimEnvelope {
   workerId: string
   jobId: string
   dispatchFencingToken?: string
+  assignmentFencingToken?: string
   repoPath: string
   prompt: string
   executionMode: ExecutionMode
@@ -67,6 +68,7 @@ export function buildRemoteJobClaimEnvelope(input: {
   workerId: string
   jobId: string
   dispatchFencingToken?: string
+  assignmentFencingToken?: string
   repoPath: string
   prompt: string
   executionMode: ExecutionMode
@@ -83,6 +85,9 @@ export function buildRemoteJobClaimEnvelope(input: {
     ...(input.dispatchFencingToken === undefined
       ? {}
       : { dispatchFencingToken: input.dispatchFencingToken }),
+    ...(input.assignmentFencingToken === undefined
+      ? {}
+      : { assignmentFencingToken: input.assignmentFencingToken }),
     repoPath: input.repoPath,
     prompt: input.prompt,
     executionMode: input.executionMode,

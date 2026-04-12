@@ -1,4 +1,4 @@
-export type AuditActorType = 'internal' | 'operator' | 'service'
+export type AuditActorType = 'internal' | 'operator' | 'service' | 'executor'
 export type AuditOutcome = 'allowed' | 'denied'
 export type AuditResourceKind = 'job' | 'worker' | 'session' | 'system'
 

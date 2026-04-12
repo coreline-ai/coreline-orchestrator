@@ -13,6 +13,7 @@ import type { WorkerManager } from '../workers/workerManager.js'
 import { applyApiMiddleware, applyInternalApiMiddleware } from './middleware.js'
 import { createAuditRouter } from './routes/audit.js'
 import { createArtifactsRouter } from './routes/artifacts.js'
+import { createDistributedRouter } from './routes/distributed.js'
 import { createEventsRouter } from './routes/events.js'
 import { createHealthRouter } from './routes/health.js'
 import { createInternalRouter } from './routes/internal.js'
@@ -97,6 +98,16 @@ export function createApp(dependencies: AppDependencies): Hono {
   )
   api.route(
     '/',
+    createDistributedRouter({
+      config: dependencies.config,
+      stateStore: dependencies.stateStore,
+      scheduler: dependencies.scheduler,
+      sessionManager: dependencies.sessionManager,
+      controlPlaneCoordinator: dependencies.controlPlaneCoordinator,
+    }),
+  )
+  api.route(
+    '/',
     createEventsRouter({
       stateStore: dependencies.stateStore,
       eventBus: dependencies.eventBus,
@@ -114,12 +125,16 @@ export function createApp(dependencies: AppDependencies): Hono {
   )
 
   const internal = new Hono()
-  applyInternalApiMiddleware(internal, dependencies.config)
+  applyInternalApiMiddleware(internal, dependencies.config, {
+    stateStore: dependencies.stateStore,
+    eventBus: dependencies.eventBus,
+  })
   internal.route(
     '/',
     createInternalRouter({
       config: dependencies.config,
       stateStore: dependencies.stateStore,
+      eventBus: dependencies.eventBus,
       scheduler: dependencies.scheduler,
       workerManager: dependencies.workerManager,
       controlPlaneCoordinator: dependencies.controlPlaneCoordinator,

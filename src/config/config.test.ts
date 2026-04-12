@@ -1,6 +1,10 @@
 import { describe, expect, test } from 'bun:test'
 
-import { assertSafeApiConfig, loadConfig } from './config.js'
+import {
+  assertSafeApiConfig,
+  loadConfig,
+  resolvePrimaryDistributedServiceCredential,
+} from './config.js'
 
 describe('config', () => {
   test('loads defaults when environment variables are absent', () => {
@@ -12,6 +16,8 @@ describe('config', () => {
     expect(config.apiAuthToken).toBeUndefined()
     expect(config.distributedServiceUrl).toBeUndefined()
     expect(config.distributedServiceToken).toBeUndefined()
+    expect(config.distributedServiceTokenId).toBeUndefined()
+    expect(config.distributedServiceTokens).toEqual([])
     expect(config.controlPlaneBackend).toBe('memory')
     expect(config.dispatchQueueBackend).toBe('memory')
     expect(config.eventStreamBackend).toBe('memory')
@@ -37,6 +43,9 @@ describe('config', () => {
       ORCH_API_TOKEN: 'secret-token',
       ORCH_DISTRIBUTED_SERVICE_URL: 'http://127.0.0.1:4100',
       ORCH_DISTRIBUTED_SERVICE_TOKEN: 'distributed-token',
+      ORCH_DISTRIBUTED_SERVICE_TOKEN_ID: 'distributed-primary',
+      ORCH_DISTRIBUTED_SERVICE_TOKENS:
+        '[{"token_id":"dist-next","token":"rotated-token","subject":"dist-next","actor_type":"executor","scopes":["internal:worker_plane"],"not_before":"2026-04-12T00:00:00.000Z","expires_at":"2026-04-13T00:00:00.000Z"}]',
       ORCH_API_TOKENS:
         '[{"token_id":"ops-reader","token":"reader-token","subject":"ops-reader","actor_type":"operator","scopes":["jobs:read"],"repo_paths":["/repo/a"],"job_ids":["job_01"],"session_ids":["sess_01"]}]',
       ORCH_CONTROL_BACKEND: 'service',
@@ -56,6 +65,10 @@ describe('config', () => {
       ORCH_DEFAULT_TIMEOUT_SECONDS: '900',
       ORCH_WORKER_BINARY: '/usr/local/bin/codexcode',
       ORCH_WORKER_MODE: 'background',
+      ORCH_ALERT_MAX_QUEUE_DEPTH: '11',
+      ORCH_ALERT_MAX_STALE_EXECUTORS: '1',
+      ORCH_ALERT_MAX_STALE_ASSIGNMENTS: '2',
+      ORCH_ALERT_MAX_STUCK_SESSIONS: '3',
     })
 
     expect(config.apiHost).toBe('0.0.0.0')
@@ -64,6 +77,18 @@ describe('config', () => {
     expect(config.apiAuthToken).toBe('secret-token')
     expect(config.distributedServiceUrl).toBe('http://127.0.0.1:4100')
     expect(config.distributedServiceToken).toBe('distributed-token')
+    expect(config.distributedServiceTokenId).toBe('distributed-primary')
+    expect(config.distributedServiceTokens).toEqual([
+      {
+        tokenId: 'dist-next',
+        token: 'rotated-token',
+        subject: 'dist-next',
+        actorType: 'executor',
+        scopes: ['internal:worker_plane'],
+        notBefore: '2026-04-12T00:00:00.000Z',
+        expiresAt: '2026-04-13T00:00:00.000Z',
+      },
+    ])
     expect(config.apiAuthTokens).toEqual([
       {
         tokenId: 'ops-reader',
@@ -93,6 +118,10 @@ describe('config', () => {
     expect(config.defaultTimeoutSeconds).toBe(900)
     expect(config.workerBinary).toBe('/usr/local/bin/codexcode')
     expect(config.workerMode).toBe('background')
+    expect(config.distributedAlertMaxQueueDepth).toBe(11)
+    expect(config.distributedAlertMaxStaleExecutors).toBe(1)
+    expect(config.distributedAlertMaxStaleAssignments).toBe(2)
+    expect(config.distributedAlertMaxStuckSessions).toBe(3)
   })
 
   test('falls back for invalid numeric or mode values', () => {
@@ -153,8 +182,22 @@ describe('config', () => {
         }),
       ),
     ).toThrow(
-      'Distributed service backends require ORCH_DISTRIBUTED_SERVICE_URL and ORCH_DISTRIBUTED_SERVICE_TOKEN.',
+      'Distributed service backends require ORCH_DISTRIBUTED_SERVICE_URL and a primary distributed service credential.',
     )
+  })
+
+  test('allows named distributed credentials to satisfy service backend requirements', () => {
+    expect(() =>
+      assertSafeApiConfig(
+        loadConfig({
+          ORCH_CONTROL_BACKEND: 'service',
+          ORCH_DISTRIBUTED_SERVICE_URL: 'http://127.0.0.1:4100',
+          ORCH_DISTRIBUTED_SERVICE_TOKEN_ID: 'dist-primary',
+          ORCH_DISTRIBUTED_SERVICE_TOKENS:
+            '[{"token_id":"dist-primary","token":"primary-token","subject":"dist-primary","actor_type":"service","scopes":["internal:*"]}]',
+        }),
+      ),
+    ).not.toThrow()
   })
 
   test('rejects invalid ORCH_API_TOKENS json', () => {
@@ -163,5 +206,23 @@ describe('config', () => {
         ORCH_API_TOKENS: '{invalid-json}',
       }),
     ).toThrow('ORCH_API_TOKENS must be valid JSON.')
+  })
+
+  test('resolves the primary distributed credential from named tokens', () => {
+    const credential = resolvePrimaryDistributedServiceCredential(
+      loadConfig({
+        ORCH_DISTRIBUTED_SERVICE_TOKEN_ID: 'dist-primary',
+        ORCH_DISTRIBUTED_SERVICE_TOKENS:
+          '[{"token_id":"dist-primary","token":"primary-token","subject":"dist-primary","actor_type":"service","scopes":["internal:*"]}]',
+      }),
+    )
+
+    expect(credential).toEqual({
+      tokenId: 'dist-primary',
+      token: 'primary-token',
+      subject: 'dist-primary',
+      actorType: 'service',
+      scopes: ['internal:*'],
+    })
   })
 })

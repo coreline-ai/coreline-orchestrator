@@ -7,19 +7,27 @@ import type {
   RemoteWorkerHeartbeatEnvelope,
   RemoteWorkerResultEnvelope,
 } from '../../control/remotePlane.js'
-import { InvalidConfigurationError } from '../../core/errors.js'
+import { FencingTokenMismatchError, InvalidConfigurationError } from '../../core/errors.js'
+import type { EventPublisher } from '../../core/eventBus.js'
 import { validateRepoPath } from '../../isolation/repoPolicy.js'
 import type { Scheduler } from '../../scheduler/scheduler.js'
 import { publishManifestedBuffer } from '../../storage/manifestTransport.js'
 import type { StateStore } from '../../storage/types.js'
 import type { WorkerManager } from '../../workers/workerManager.js'
+import { appendAuditEvent } from '../audit.js'
+import { requireDistributedServiceScope } from '../internalAuth.js'
 
 interface InternalRouterDependencies {
   config: Pick<
     OrchestratorConfig,
-    'allowedRepoRoots' | 'orchestratorRootDir'
+    | 'allowedRepoRoots'
+    | 'orchestratorRootDir'
+    | 'distributedServiceToken'
+    | 'distributedServiceTokenId'
+    | 'distributedServiceTokens'
   >
   stateStore: StateStore
+  eventBus: EventPublisher
   scheduler: Scheduler
   workerManager: Partial<
     Pick<WorkerManager, 'recordRemoteHeartbeat' | 'acceptRemoteResult'>
@@ -33,12 +41,14 @@ export function createInternalRouter(
   const router = new Hono()
 
   router.post('/control/executors/register', async (c) => {
+    requireDistributedServiceScope(c.req.raw, dependencies.config, 'internal:control')
     return c.json(
       await requireCoordinator(dependencies).registerExecutor(await c.req.json()),
     )
   })
 
   router.post('/control/executors/:executorId/heartbeat', async (c) => {
+    requireDistributedServiceScope(c.req.raw, dependencies.config, 'internal:control')
     const body = await c.req
       .json<{ now?: string }>()
       .catch(() => ({}) as { now?: string })
@@ -51,6 +61,7 @@ export function createInternalRouter(
   })
 
   router.delete('/control/executors/:executorId', async (c) => {
+    requireDistributedServiceScope(c.req.raw, dependencies.config, 'internal:control')
     return c.json(
       await requireCoordinator(dependencies).unregisterExecutor(
         c.req.param('executorId'),
@@ -59,6 +70,7 @@ export function createInternalRouter(
   })
 
   router.get('/control/executors/:executorId', async (c) => {
+    requireDistributedServiceScope(c.req.raw, dependencies.config, 'internal:control')
     return c.json(
       await requireCoordinator(dependencies).getExecutor(c.req.param('executorId'), {
         staleAfterMs: parseOptionalNumber(c.req.query('staleAfterMs')),
@@ -68,6 +80,7 @@ export function createInternalRouter(
   })
 
   router.get('/control/executors', async (c) => {
+    requireDistributedServiceScope(c.req.raw, dependencies.config, 'internal:control')
     return c.json(
       await requireCoordinator(dependencies).listExecutors({
         staleAfterMs: parseOptionalNumber(c.req.query('staleAfterMs')),
@@ -78,18 +91,21 @@ export function createInternalRouter(
   })
 
   router.post('/control/leases/acquire', async (c) => {
+    requireDistributedServiceScope(c.req.raw, dependencies.config, 'internal:control')
     return c.json(
       await requireCoordinator(dependencies).acquireLease(await c.req.json()),
     )
   })
 
   router.post('/control/leases/release', async (c) => {
+    requireDistributedServiceScope(c.req.raw, dependencies.config, 'internal:control')
     return c.json(
       await requireCoordinator(dependencies).releaseLease(await c.req.json()),
     )
   })
 
   router.get('/control/leases/:leaseKey', async (c) => {
+    requireDistributedServiceScope(c.req.raw, dependencies.config, 'internal:control')
     return c.json(
       await requireCoordinator(dependencies).getLease(
         c.req.param('leaseKey'),
@@ -99,12 +115,14 @@ export function createInternalRouter(
   })
 
   router.post('/control/workers/heartbeat', async (c) => {
+    requireDistributedServiceScope(c.req.raw, dependencies.config, 'internal:control')
     return c.json(
       await requireCoordinator(dependencies).upsertWorkerHeartbeat(await c.req.json()),
     )
   })
 
   router.post('/control/workers/:workerId/release', async (c) => {
+    requireDistributedServiceScope(c.req.raw, dependencies.config, 'internal:control')
     const body = await c.req.json<{ executorId: string; now?: string; reason?: string }>()
     return c.json(
       await requireCoordinator(dependencies).releaseWorkerHeartbeat({
@@ -117,6 +135,7 @@ export function createInternalRouter(
   })
 
   router.get('/control/workers/:workerId', async (c) => {
+    requireDistributedServiceScope(c.req.raw, dependencies.config, 'internal:control')
     return c.json(
       await requireCoordinator(dependencies).getWorkerAssignment(
         c.req.param('workerId'),
@@ -126,6 +145,7 @@ export function createInternalRouter(
   })
 
   router.get('/control/workers', async (c) => {
+    requireDistributedServiceScope(c.req.raw, dependencies.config, 'internal:control')
     return c.json(
       await requireCoordinator(dependencies).listWorkerAssignments({
         includeReleased: parseOptionalBoolean(c.req.query('includeReleased')),
@@ -136,6 +156,7 @@ export function createInternalRouter(
   })
 
   router.get('/events', async (c) => {
+    requireDistributedServiceScope(c.req.raw, dependencies.config, 'internal:events')
     const searchParams = new URL(c.req.url).searchParams
     const eventType = searchParams.getAll('eventType')
     return c.json(
@@ -152,6 +173,7 @@ export function createInternalRouter(
   })
 
   router.post('/object-store/publish', async (c) => {
+    requireDistributedServiceScope(c.req.raw, dependencies.config, 'internal:object_store')
     const body = await c.req.json<{
       repoPath: string
       orchestratorRootDir?: string
@@ -182,18 +204,65 @@ export function createInternalRouter(
   })
 
   router.post('/worker-plane/claim', async (c) => {
+    requireDistributedServiceScope(c.req.raw, dependencies.config, 'internal:worker_plane')
     const body = await c.req.json<RemoteJobClaimRequest>()
     return c.json(await dependencies.scheduler.claimRemoteJob(body))
   })
 
   router.post('/worker-plane/heartbeats', async (c) => {
+    const principal = requireDistributedServiceScope(
+      c.req.raw,
+      dependencies.config,
+      'internal:worker_plane',
+    )
     const body = await c.req.json<RemoteWorkerHeartbeatEnvelope>()
-    return c.json(await requireRemoteWorkerManager(dependencies).recordRemoteHeartbeat(body))
+    try {
+      return c.json(await requireRemoteWorkerManager(dependencies).recordRemoteHeartbeat(body))
+    } catch (error) {
+      if (error instanceof FencingTokenMismatchError) {
+        await appendAuditEvent(dependencies, {
+          principal,
+          action: 'internal.worker_plane.heartbeat',
+          requiredScope: 'internal:worker_plane',
+          resourceKind: 'worker',
+          resourceId: body.workerId,
+          outcome: 'denied',
+          details: {
+            executorId: body.executorId,
+            reason: 'fencing_token_mismatch',
+          },
+        })
+      }
+      throw error
+    }
   })
 
   router.post('/worker-plane/results', async (c) => {
+    const principal = requireDistributedServiceScope(
+      c.req.raw,
+      dependencies.config,
+      'internal:worker_plane',
+    )
     const body = await c.req.json<RemoteWorkerResultEnvelope>()
-    return c.json(await requireRemoteWorkerManager(dependencies).acceptRemoteResult(body))
+    try {
+      return c.json(await requireRemoteWorkerManager(dependencies).acceptRemoteResult(body))
+    } catch (error) {
+      if (error instanceof FencingTokenMismatchError) {
+        await appendAuditEvent(dependencies, {
+          principal,
+          action: 'internal.worker_plane.result',
+          requiredScope: 'internal:worker_plane',
+          resourceKind: 'worker',
+          resourceId: body.workerId,
+          outcome: 'denied',
+          details: {
+            executorId: body.executorId,
+            reason: 'fencing_token_mismatch',
+          },
+        })
+      }
+      throw error
+    }
   })
 
   return router

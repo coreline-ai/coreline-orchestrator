@@ -12,19 +12,23 @@ import type {
   WorkerHeartbeatInput,
   WorkerHeartbeatReleaseInput,
 } from './coordination.js'
+import { createDistributedServiceAuthHeaders } from '../api/internalAuth.js'
 
 interface ServiceControlPlaneCoordinatorOptions {
   baseUrl: string
   token: string
+  tokenId?: string
 }
 
 export class ServiceControlPlaneCoordinator implements ControlPlaneCoordinator {
   readonly #baseUrl: string
   readonly #token: string
+  readonly #tokenId: string | undefined
 
   constructor(options: ServiceControlPlaneCoordinatorOptions) {
     this.#baseUrl = normalizeBaseUrl(options.baseUrl)
     this.#token = options.token
+    this.#tokenId = options.tokenId
   }
 
   async initialize(): Promise<void> {
@@ -188,7 +192,10 @@ export class ServiceControlPlaneCoordinator implements ControlPlaneCoordinator {
     const response = await fetch(new URL(path, this.#baseUrl), {
       method: init.method ?? 'GET',
       headers: {
-        authorization: `Bearer ${this.#token}`,
+        ...createDistributedServiceAuthHeaders({
+          token: this.#token,
+          tokenId: this.#tokenId ?? 'distributed-shared',
+        }),
         accept: 'application/json',
         ...(init.body === undefined ? {} : { 'content-type': 'application/json' }),
       },

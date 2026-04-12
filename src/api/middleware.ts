@@ -1,7 +1,10 @@
 import type { Hono } from 'hono'
 
 import type { OrchestratorConfig } from '../config/config.js'
+import type { EventPublisher } from '../core/eventBus.js'
+import type { StateStore } from '../storage/types.js'
 import { resolveApiPrincipal } from './auth.js'
+import { appendAuditEvent } from './audit.js'
 import { requireDistributedServiceAuth } from './internalAuth.js'
 import {
   OrchestratorError,
@@ -48,11 +51,39 @@ export function applyApiMiddleware(
 
 export function applyInternalApiMiddleware(
   app: Hono,
-  config: Pick<OrchestratorConfig, 'distributedServiceToken'>,
+  config: Pick<
+    OrchestratorConfig,
+    'distributedServiceToken' | 'distributedServiceTokenId' | 'distributedServiceTokens'
+  >,
+  dependencies?: {
+    stateStore: StateStore
+    eventBus: EventPublisher
+  },
 ): void {
   app.use('*', async (c, next) => {
-    requireDistributedServiceAuth(c.req.raw, config)
-    await next()
+    try {
+      requireDistributedServiceAuth(c.req.raw, config)
+      await next()
+    } catch (error) {
+      if (
+        dependencies !== undefined &&
+        error instanceof OrchestratorError &&
+        error.code === 'AUTHENTICATION_REQUIRED'
+      ) {
+        await appendAuditEvent(dependencies, {
+          principal: null,
+          action: 'internal.request',
+          requiredScope: 'internal:*',
+          resourceKind: 'system',
+          resourceId: c.req.path,
+          outcome: 'denied',
+          details: {
+            reason: String(error.details?.reason ?? 'unknown'),
+          },
+        })
+      }
+      throw error
+    }
   })
 
   app.onError((error, c) => {
@@ -184,6 +215,7 @@ function mapErrorStatus(code: string): number {
     case 'ARTIFACT_NOT_FOUND':
       return 404
     case 'INVALID_STATE_TRANSITION':
+    case 'FENCING_TOKEN_MISMATCH':
       return 409
     case 'CAPACITY_EXCEEDED':
       return 429

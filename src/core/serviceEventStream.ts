@@ -1,9 +1,11 @@
 import { EventBus, type EventFilter, type EventStream } from './eventBus.js'
 import type { OrchestratorEvent } from './events.js'
+import { createDistributedServiceAuthHeaders } from '../api/internalAuth.js'
 
 interface ServicePollingEventStreamOptions {
   baseUrl: string
   token: string
+  tokenId?: string
   pollIntervalMs?: number
   pollLimit?: number
 }
@@ -12,12 +14,14 @@ export class ServicePollingEventStream implements EventStream {
   readonly #eventBus = new EventBus()
   readonly #baseUrl: string
   readonly #token: string
+  readonly #tokenId: string | undefined
   readonly #pollIntervalMs: number
   readonly #pollLimit: number
 
   constructor(options: ServicePollingEventStreamOptions) {
     this.#baseUrl = options.baseUrl.endsWith('/') ? options.baseUrl : `${options.baseUrl}/`
     this.#token = options.token
+    this.#tokenId = options.tokenId
     this.#pollIntervalMs = options.pollIntervalMs ?? 250
     this.#pollLimit = options.pollLimit ?? 200
   }
@@ -107,7 +111,10 @@ export class ServicePollingEventStream implements EventStream {
       new URL(`/internal/v1/events${withSearch(search)}`, this.#baseUrl),
       {
         headers: {
-          authorization: `Bearer ${this.#token}`,
+          ...createDistributedServiceAuthHeaders({
+            token: this.#token,
+            tokenId: this.#tokenId ?? 'distributed-shared',
+          }),
           accept: 'application/json',
         },
       },

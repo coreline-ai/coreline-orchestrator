@@ -1,7 +1,10 @@
 import { describe, expect, test } from 'bun:test'
 
 import { JobStatus } from '../core/models.js'
-import { runMultiHostPrototype } from './multiHost.js'
+import {
+  runDistributedWorkerPlanePrototype,
+  runMultiHostPrototype,
+} from './multiHost.js'
 
 describe('multi-host prototype', () => {
   test('uses a lease-based leader scheduler and fails over to a second executor', async () => {
@@ -36,5 +39,21 @@ describe('multi-host prototype', () => {
       result.remote_worker_plane.worker_heartbeat.assignmentFencingToken,
     ).toContain(`worker:${result.second_job.worker_id}:exec_beta`)
     expect(result.remote_worker_plane.worker_heartbeat.status).toBe('released')
+  })
+
+  test('runs jobs through the network worker-plane and observes remote executor failover', async () => {
+    const result = await runDistributedWorkerPlanePrototype({
+      workerBinary: './scripts/fixtures/smoke-success-worker.sh',
+    })
+
+    expect(result.first_job.job_status).toBe(JobStatus.Completed)
+    expect(result.first_job.executor_id).toBe('remote_alpha')
+    expect(result.second_job.job_status).toBe(JobStatus.Completed)
+    expect(result.second_job.executor_id).toBe('remote_beta')
+    expect(result.artifact_transport).toBe('object_store_service')
+    expect(result.result_transport).toBe('object_store_service')
+    expect(result.remote_failover_observed).toBe(true)
+    expect(result.registered_executors).toContain('ctrl_main')
+    expect(result.registered_executors).toContain('remote_beta')
   })
 })

@@ -574,21 +574,21 @@ coreline-orchestrator/
 - ✅ Phase 4: Remote Executor Worker-plane Integration
 - ✅ Phase 5: Cutover / Rollback / Failover Ops Hardening
 
-현재 distributed prototype 결론:
+현재 distributed 결론:
 - scheduler 전략은 **lease-based single leader**
-- multi-host prototype은 **shared SQLite coordinator + shared SQLite dispatch queue + state-store polling event replay** 조합으로 검증됨
-- artifact/log/result transport는 `object_store_manifest` projection으로 remote-friendly path를 제공함
-- remote worker plane 최소 계약은 `src/control/remotePlane.ts`에 고정되어 있고 dispatch/assignment fencing token을 포함함
-- `stopRuntime()`은 **local executor drain**만 수행하고, `stopOrchestrator()`만 singleton global shutdown semantics를 유지함
-- shared filesystem은 현재도 manifest blob backing store로 사용되며, true network object store cutover는 다음 로드맵 범위다
+- prototype 경로는 여전히 **shared SQLite coordinator + shared SQLite dispatch queue + state-store polling event replay** 조합으로 유지된다
+- production distributed follow-up은 **internal service-backed coordinator path + remote executor network worker-plane + `object_store_service` upload path** 까지 구현되었다
+- artifact/log/result transport는 `object_store_manifest`와 `object_store_service`를 모두 지원하며, remote executor는 service upload 후 manifest path를 publish한다
+- remote worker plane 최소 계약은 `src/control/remotePlane.ts`에 고정되어 있고 dispatch/assignment fencing token을 포함한다
+- `stopRuntime()`은 **local executor drain**만 수행하고, `stopOrchestrator()`만 singleton global shutdown semantics를 유지한다
 
 ### Next Roadmap ([dev-plan](dev-plan/implement_20260411_225207.md))
 
-- 🔲 Phase 1: External Coordinator Service & Fencing Enforcement
-- 🔲 Phase 2: Durable Broker-backed Queue / Event Stream
-- 🔲 Phase 3: Network Object-store Transport Cutover
-- 🔲 Phase 4: Remote Executor Network Worker-plane MVP
-- 🔲 Phase 5: Production Cutover / Rollback / Failover Readiness
+- ✅ Phase 1: External Coordinator Service & Fencing Enforcement
+- ✅ Phase 2: Durable Broker-backed Queue / Event Stream
+- ✅ Phase 3: Network Object-store Transport Cutover
+- ✅ Phase 4: Remote Executor Network Worker-plane MVP
+- ✅ Phase 5: Production Cutover / Rollback / Failover Readiness
 
 ---
 
@@ -602,8 +602,14 @@ coreline-orchestrator/
 | [`docs/IMPLEMENTATION-PLAN.md`](docs/IMPLEMENTATION-PLAN.md) | 4-phase implementation strategy |
 | [`docs/API-DRAFT.md`](docs/API-DRAFT.md) | Full API contract with examples |
 | [`docs/OPERATIONS.md`](docs/OPERATIONS.md) | Operations runbook, smoke commands, and operator procedures |
+| [`docs/REAL-SMOKE-RUNBOOK.md`](docs/REAL-SMOKE-RUNBOOK.md) | Manual real-worker smoke preflight, execution steps, and reporting rules |
+| [`docs/REAL-SMOKE-REPORT-TEMPLATE.md`](docs/REAL-SMOKE-REPORT-TEMPLATE.md) | Manual real-worker smoke report template |
+| [`docs/REAL-SMOKE-REPORT-20260412.md`](docs/REAL-SMOKE-REPORT-20260412.md) | Actual operator-machine real-worker smoke record |
 | [`docs/MIGRATION-V2.md`](docs/MIGRATION-V2.md) | File→SQLite dry-run, cutover, and rollback procedure |
 | [`docs/V2-READINESS.md`](docs/V2-READINESS.md) | v2 compatibility matrix, release checklist, and ship gates |
+| [`docs/DEEP-VERIFICATION.md`](docs/DEEP-VERIFICATION.md) | Post-ship soak/fault-injection matrix and minimal harness |
+| [`docs/BUN-EXIT-PROBE.md`](docs/BUN-EXIT-PROBE.md) | Bun CLI exit-delay repro/probe notes and workaround boundary |
+| [`docs/BUN-EXIT-ISSUE-DRAFT-20260412.md`](docs/BUN-EXIT-ISSUE-DRAFT-20260412.md) | Current Bun exit-delay issue draft with captured evidence |
 | [`docs/RELEASE-NOTES.md`](docs/RELEASE-NOTES.md) | Human-friendly release summary for the shipped baseline |
 | [`docs/OSS-COMPARISON.md`](docs/OSS-COMPARISON.md) | Build-vs-buy analysis (Temporal, LangGraph, etc.) |
 | [`docs/IMPL-DETAIL.md`](docs/IMPL-DETAIL.md) | Granular task breakdown with test cases |
@@ -615,6 +621,8 @@ coreline-orchestrator/
 | [`dev-plan/implement_20260411_135150.md`](dev-plan/implement_20260411_135150.md) | Post-v2 follow-up plan (session reattach / auth / distributed) |
 | [`dev-plan/implement_20260411_210712.md`](dev-plan/implement_20260411_210712.md) | Distributed control-plane follow-up plan (coordinator / queue / transport / failover) |
 | [`dev-plan/implement_20260411_225207.md`](dev-plan/implement_20260411_225207.md) | Production distributed roadmap (external coordinator / broker / object store / remote executor) |
+| [`dev-plan/implement_20260412_075941.md`](dev-plan/implement_20260412_075941.md) | Full-test validation plan and verification record |
+| [`dev-plan/implement_20260412_084602.md`](dev-plan/implement_20260412_084602.md) | Follow-up manual/deep/Bun-probe verification plan |
 | [`CLAUDE.md`](CLAUDE.md) | AI agent project context |
 
 ---
@@ -635,15 +643,23 @@ bun run typecheck    # Type check only
 bun run check:release-hygiene  # Check exact pinning + lockfile/script drift
 bun run ops:smoke:fixture  # CI-safe success smoke with fixture worker
 bun run ops:smoke:timeout:fixture  # CI-safe timeout smoke with fixture worker
+bun run ops:smoke:real:preflight  # Manual real-worker smoke preflight
 bun run ops:smoke:real  # Manual real-worker smoke using codexcode
 bun run ops:smoke:v2:session:fixture  # Session + SQLite + WebSocket fixture smoke
 bun run ops:smoke:session:reattach:fixture  # Same-session reconnect/resume smoke
 bun run ops:migrate:dry-run  # File→SQLite dry-run and rollback rehearsal
 bun run ops:smoke:multihost:prototype  # Shared SQLite + lease-based multi-host simulation
+bun run ops:smoke:multihost:service  # External-service-backed remote executor multi-host smoke
 bun run ops:verify:v2  # v2 smoke + migration verification bundle
-bun run ops:verify:distributed  # Distributed prototype failover verification bundle
+bun run ops:verify:distributed  # Prototype + service worker-plane distributed verification bundle
+bun run ops:verify:deep:plan  # Post-ship deep verification matrix output
+bun run ops:probe:soak:fixture  # Minimal soak-lite fixture harness
+bun run ops:probe:fault:fixture  # Minimal fault-injection fixture harness
+bun run ops:probe:bun-exit  # Bun exit-delay repro/probe helper
+bun run ops:probe:bun-exit:migration  # Migration path exit-delay probe
+bun run ops:verify:deep:weekly  # Post-ship weekly deep verification bundle
 bun run release:v2:check  # Full release gate plus v2 ops verification
-bun run release:distributed:check  # v2 gate + distributed prototype verification
+bun run release:distributed:check  # v2 gate + distributed prototype/service verification
 bun run verify       # Tests + typecheck + build + release hygiene checks
 bun run release:check  # Frozen-lockfile install + full release verification
 ```
@@ -665,16 +681,25 @@ bun run release:check  # Frozen-lockfile install + full release verification
 ### Distributed Prototype Backends
 
 - `ORCH_CONTROL_BACKEND=memory|sqlite`
+- `ORCH_DISTRIBUTED_SERVICE_URL`, `ORCH_DISTRIBUTED_SERVICE_TOKEN`
 - `ORCH_CONTROL_SQLITE_PATH`로 shared coordinator DB 경로를 지정할 수 있습니다.
 - `ORCH_QUEUE_BACKEND=memory|sqlite`
 - `ORCH_QUEUE_SQLITE_PATH`로 shared dispatch queue DB 경로를 지정할 수 있습니다.
-- `ORCH_EVENT_STREAM_BACKEND=memory|state_store_polling`
-- `ORCH_ARTIFACT_TRANSPORT=shared_filesystem|object_store_manifest`
+- `ORCH_EVENT_STREAM_BACKEND=memory|state_store_polling|service_polling`
+- `ORCH_ARTIFACT_TRANSPORT=shared_filesystem|object_store_manifest|object_store_service`
+- `ORCH_WORKER_PLANE_BACKEND=local|remote_agent_service`
 - 현재 distributed prototype 권장 조합은:
   - control plane: `sqlite`
   - queue: `sqlite`
   - event stream: `state_store_polling`
   - artifact transport: `object_store_manifest`
+- network worker-plane 권장 조합은:
+  - control plane: `sqlite`
+  - queue: `sqlite`
+  - event stream: `state_store_polling`
+  - artifact transport: `object_store_service`
+  - worker plane: `remote_agent_service`
+  - distributed service auth: `ORCH_DISTRIBUTED_SERVICE_URL` + `ORCH_DISTRIBUTED_SERVICE_TOKEN`
 
 ### Operations Smoke
 
@@ -684,8 +709,20 @@ bun run release:check  # Frozen-lockfile install + full release verification
   - `bun run ops:smoke:v2:session:fixture`
 - migration rehearsal:
   - `bun run ops:migrate:dry-run`
+- manual real-worker follow-up:
+  - `bun run ops:smoke:real:preflight`
+  - `bun run ops:smoke:real`
+  - see `docs/REAL-SMOKE-RUNBOOK.md`
+- deep verification follow-up:
+  - `bun run ops:verify:deep:plan`
+  - `bun run ops:probe:soak:fixture`
+  - `bun run ops:probe:fault:fixture`
+  - `bun run ops:probe:bun-exit`
+  - `bun run ops:probe:bun-exit:migration`
+  - `bun run ops:verify:deep:weekly`
 - distributed prototype verification:
   - `bun run ops:smoke:multihost:prototype`
+  - `bun run ops:smoke:multihost:service`
   - `bun run ops:verify:distributed`
 - manual real-worker smoke:
   - `bun run ops:smoke:real`

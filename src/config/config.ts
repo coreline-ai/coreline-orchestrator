@@ -4,10 +4,17 @@ import { InvalidConfigurationError } from '../core/errors.js'
 export type ApiExposureMode = 'trusted_local' | 'untrusted_network'
 export type StateStoreBackend = 'file' | 'sqlite'
 export type ApiPrincipalActorType = 'operator' | 'service'
-export type ControlPlaneBackend = 'memory' | 'sqlite'
+export type ControlPlaneBackend = 'memory' | 'sqlite' | 'service'
 export type DispatchQueueBackend = 'memory' | 'sqlite'
-export type EventStreamBackend = 'memory' | 'state_store_polling'
-export type ArtifactTransportMode = 'shared_filesystem' | 'object_store_manifest'
+export type EventStreamBackend =
+  | 'memory'
+  | 'state_store_polling'
+  | 'service_polling'
+export type ArtifactTransportMode =
+  | 'shared_filesystem'
+  | 'object_store_manifest'
+  | 'object_store_service'
+export type WorkerPlaneBackend = 'local' | 'remote_agent_service'
 
 export interface ApiAuthTokenConfig {
   tokenId: string
@@ -26,6 +33,8 @@ export interface OrchestratorConfig {
   apiExposure: ApiExposureMode
   apiAuthToken?: string
   apiAuthTokens?: ApiAuthTokenConfig[]
+  distributedServiceUrl?: string
+  distributedServiceToken?: string
   controlPlaneBackend: ControlPlaneBackend
   controlPlaneSqlitePath?: string
   dispatchQueueBackend: DispatchQueueBackend
@@ -35,6 +44,7 @@ export interface OrchestratorConfig {
   stateStoreImportFromFile: boolean
   stateStoreSqlitePath?: string
   artifactTransportMode: ArtifactTransportMode
+  workerPlaneBackend: WorkerPlaneBackend
   maxActiveWorkers: number
   maxWriteWorkersPerRepo: number
   allowedRepoRoots: string[]
@@ -48,12 +58,15 @@ const defaultConfig: OrchestratorConfig = {
   apiHost: '127.0.0.1',
   apiPort: 3100,
   apiExposure: 'trusted_local',
+  distributedServiceUrl: undefined,
+  distributedServiceToken: undefined,
   controlPlaneBackend: 'memory',
   dispatchQueueBackend: 'memory',
   eventStreamBackend: 'memory',
   stateStoreBackend: 'file',
   stateStoreImportFromFile: false,
   artifactTransportMode: 'shared_filesystem',
+  workerPlaneBackend: 'local',
   maxActiveWorkers: 4,
   maxWriteWorkersPerRepo: 1,
   allowedRepoRoots: [],
@@ -75,6 +88,12 @@ export function loadConfig(
     ),
     apiAuthToken: normalizeOptionalString(env.ORCH_API_TOKEN),
     apiAuthTokens: parseApiAuthTokens(env.ORCH_API_TOKENS),
+    distributedServiceUrl: normalizeOptionalString(
+      env.ORCH_DISTRIBUTED_SERVICE_URL,
+    ),
+    distributedServiceToken: normalizeOptionalString(
+      env.ORCH_DISTRIBUTED_SERVICE_TOKEN,
+    ),
     controlPlaneBackend: parseControlPlaneBackend(
       env.ORCH_CONTROL_BACKEND,
       defaultConfig.controlPlaneBackend,
@@ -101,6 +120,10 @@ export function loadConfig(
     artifactTransportMode: parseArtifactTransportMode(
       env.ORCH_ARTIFACT_TRANSPORT,
       defaultConfig.artifactTransportMode,
+    ),
+    workerPlaneBackend: parseWorkerPlaneBackend(
+      env.ORCH_WORKER_PLANE_BACKEND,
+      defaultConfig.workerPlaneBackend,
     ),
     maxActiveWorkers: parsePositiveInteger(
       env.ORCH_MAX_WORKERS,
@@ -134,6 +157,23 @@ export function assertSafeApiConfig(config: OrchestratorConfig): void {
     throw new InvalidConfigurationError(
       'ORCH_API_TOKEN',
       'External API exposure requires ORCH_API_TOKEN or ORCH_API_TOKENS.',
+    )
+  }
+
+  const distributedServiceRequired =
+    config.controlPlaneBackend === 'service' ||
+    config.eventStreamBackend === 'service_polling' ||
+    config.artifactTransportMode === 'object_store_service' ||
+    config.workerPlaneBackend === 'remote_agent_service'
+
+  if (
+    distributedServiceRequired &&
+    (normalizeOptionalString(config.distributedServiceUrl) === undefined ||
+      normalizeOptionalString(config.distributedServiceToken) === undefined)
+  ) {
+    throw new InvalidConfigurationError(
+      'ORCH_DISTRIBUTED_SERVICE_URL',
+      'Distributed service backends require ORCH_DISTRIBUTED_SERVICE_URL and ORCH_DISTRIBUTED_SERVICE_TOKEN.',
     )
   }
 }
@@ -279,7 +319,7 @@ function parseControlPlaneBackend(
   rawValue: string | undefined,
   fallback: ControlPlaneBackend,
 ): ControlPlaneBackend {
-  if (rawValue === 'memory' || rawValue === 'sqlite') {
+  if (rawValue === 'memory' || rawValue === 'sqlite' || rawValue === 'service') {
     return rawValue
   }
 
@@ -301,7 +341,11 @@ function parseEventStreamBackend(
   rawValue: string | undefined,
   fallback: EventStreamBackend,
 ): EventStreamBackend {
-  if (rawValue === 'memory' || rawValue === 'state_store_polling') {
+  if (
+    rawValue === 'memory' ||
+    rawValue === 'state_store_polling' ||
+    rawValue === 'service_polling'
+  ) {
     return rawValue
   }
 
@@ -312,7 +356,22 @@ function parseArtifactTransportMode(
   rawValue: string | undefined,
   fallback: ArtifactTransportMode,
 ): ArtifactTransportMode {
-  if (rawValue === 'shared_filesystem' || rawValue === 'object_store_manifest') {
+  if (
+    rawValue === 'shared_filesystem' ||
+    rawValue === 'object_store_manifest' ||
+    rawValue === 'object_store_service'
+  ) {
+    return rawValue
+  }
+
+  return fallback
+}
+
+function parseWorkerPlaneBackend(
+  rawValue: string | undefined,
+  fallback: WorkerPlaneBackend,
+): WorkerPlaneBackend {
+  if (rawValue === 'local' || rawValue === 'remote_agent_service') {
     return rawValue
   }
 

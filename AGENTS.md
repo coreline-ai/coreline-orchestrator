@@ -8,6 +8,12 @@ This repository has completed the v1 implementation, post-v1 P0 hardening, and v
 - `IMPLEMENTATION-PLAN.md`, `IMPL-DETAIL.md`: phased build plan and task-level detail
 - `API-DRAFT.md`: HTTP/SSE/WebSocket contract
 - `OPERATIONS.md`: smoke tests, diagnostics, operator procedures
+- `REAL-SMOKE-RUNBOOK.md`: manual real-worker smoke checklist + report workflow
+- `REAL-SMOKE-REPORT-TEMPLATE.md`: manual smoke result template
+- `REAL-SMOKE-REPORT-20260412.md`: actual operator-machine manual smoke record
+- `DEEP-VERIFICATION.md`: post-ship soak/fault-injection matrix
+- `BUN-EXIT-PROBE.md`: Bun exit-delay repro/probe notes
+- `BUN-EXIT-ISSUE-DRAFT-20260412.md`: current issue-ready Bun exit-delay evidence
 - `MIGRATION-V2.md`: file→SQLite cutover/rollback procedure
 - `V2-READINESS.md`: v2 compatibility matrix and release gates
 - `OSS-COMPARISON.md`: build-vs-buy guidance
@@ -15,7 +21,11 @@ This repository has completed the v1 implementation, post-v1 P0 hardening, and v
 - `dev-plan/implement_20260411_094401.md`: post-v1 P0 hardening plan
 - `dev-plan/implement_20260411_104301.md`: post-P0 P1/P2 hardening backlog
 - `dev-plan/implement_20260411_120538.md`: v2 staged upgrade plan
-- `dev-plan/implement_20260411_135150.md`: post-v2 follow-up plan (current)
+- `dev-plan/implement_20260411_135150.md`: post-v2 follow-up plan
+- `dev-plan/implement_20260411_210712.md`: distributed control-plane follow-up
+- `dev-plan/implement_20260411_225207.md`: production distributed roadmap
+- `dev-plan/implement_20260412_075941.md`: full-test validation plan and verification log
+- `dev-plan/implement_20260412_084602.md`: follow-up manual/deep/Bun-probe verification plan (current)
 
 Code lives under `src/`. Core domain, config/storage/isolation, runtime/logs, worker lifecycle, sessions, scheduler, API/SSE/WebSocket, ops (smoke/migration), and reconcile/shutdown modules are implemented. Treat `dist/` as generated output. The first worker-client implementation is CodexCode CLI via the `codexcode` binary.
 
@@ -39,6 +49,12 @@ Use the Bun + TypeScript workflow already scaffolded in `package.json`:
 - `bun run check:release-hygiene` — verify exact dependency pinning + lockfile/script drift policy
 - `bun run verify` — run the default local verification bundle
 - `bun run release:check` — frozen-lockfile install + full release verification
+- `bun run ops:smoke:real:preflight` — operator-machine preflight for real codexcode smoke
+- `bun run ops:verify:deep:plan` — print the post-ship deep verification matrix
+- `bun run ops:probe:soak:fixture` / `bun run ops:probe:fault:fixture` — minimal soak/fault fixture probes
+- `bun run ops:probe:bun-exit` — Bun exit-delay repro/probe helper
+- `bun run ops:probe:bun-exit:migration` — migration-path exit-delay probe
+- `bun run ops:verify:deep:weekly` — weekly post-ship deep verification bundle
 
 Keep `AGENTS.md`, `package.json`, and the planning docs aligned when commands change.
 
@@ -80,7 +96,7 @@ Restrict repositories through an allowlist, prefer worktrees for write tasks, an
 
 ## Current Status & Handoff
 
-As of **2026-04-11**, the full v1 roadmap including Reconciliation & Shutdown is complete, the post-v1 P0 hardening patch set is complete, the full post-P0 P1/P2 hardening backlog through Phase 5 is complete, v2 Phase 1~5 are complete, the post-v2 follow-up in `dev-plan/implement_20260411_135150.md` is complete through Phase 5, and the distributed control-plane follow-up in `dev-plan/implement_20260411_210712.md` is complete through Phase 5. The new active roadmap is `dev-plan/implement_20260411_225207.md`.
+As of **2026-04-12**, the full v1 roadmap including Reconciliation & Shutdown is complete, the post-v1 P0 hardening patch set is complete, the full post-P0 P1/P2 hardening backlog through Phase 5 is complete, v2 Phase 1~5 are complete, the post-v2 follow-up in `dev-plan/implement_20260411_135150.md` is complete through Phase 5, the distributed control-plane follow-up in `dev-plan/implement_20260411_210712.md` is complete through Phase 5, the production distributed roadmap in `dev-plan/implement_20260411_225207.md` is complete through Phase 5, the full-test validation plan in `dev-plan/implement_20260412_075941.md` is complete through Phase 4, and the follow-up verification plan in `dev-plan/implement_20260412_084602.md` is complete through Phase 4.
 
 Baseline confirmed:
 
@@ -109,4 +125,4 @@ Baseline confirmed:
 - distributed follow-up Phase 4 complete: remote worker-plane fencing metadata, shared sqlite coordinator/queue runtime wiring, and executor-local drain semantics in `stopRuntime()`
 - distributed follow-up Phase 5 complete: `ops:verify:distributed`, `release:distributed:check`, failover smoke verification, and distributed ops/doc sync
 
-The current distributed control-plane roadmap in `dev-plan/implement_20260411_210712.md` is complete through Phase 5. The active next roadmap is `dev-plan/implement_20260411_225207.md`, focused on a production-grade external coordinator service, broker-backed durable queue/event stream, network object-store cutover, remote executor network worker-plane, and production cutover/rollback/failover readiness. Keep `docs/API-DRAFT.md`, `docs/ARCHITECTURE.md`, `docs/OPERATIONS.md`, `docs/MIGRATION-V2.md`, `docs/V2-READINESS.md`, and `docs/RELEASE-NOTES.md` aligned as future control-plane work lands. Keep all new work consistent with the locked decisions in `PRD.md`, `TRD.md`, and `API-DRAFT.md`: `src/` layout, multi-worker fan-out, worker-authored result JSON via `resultPath`, terminal state finalized in the exit callback, process-mode startup recovery terminates detached live PIDs instead of reattaching, artifact APIs stay sandboxed to repo-relative/orchestrator-managed paths, read-heavy state queries continue to use the new index/cache path instead of reintroducing directory-wide scans, dependency/version changes must preserve exact pinning plus frozen-lockfile verification, `untrusted_network` exposure must keep named/shared token auth plus path/metadata redaction intact, session/SQLite/WebSocket changes must remain additive to the v1 process-mode contract until an explicit cutover plan supersedes it, and distributed prototype work must preserve executor-local drain semantics plus fencing-token monotonicity.
+The current distributed control-plane roadmap in `dev-plan/implement_20260411_210712.md` is complete through Phase 5, and `dev-plan/implement_20260411_225207.md` is now complete through Phase 5 as well. Shipped distributed production-follow-up scope now includes the service-backed coordinator path, internal authenticated event/object-store service endpoints, `ServiceControlPlaneCoordinator`, `ServicePollingEventStream`, `ObjectStoreServiceTransport`, `RemoteExecutorAgent`, `ops:smoke:multihost:service`, and the expanded `ops:verify:distributed` bundle. Keep `docs/API-DRAFT.md`, `docs/ARCHITECTURE.md`, `docs/OPERATIONS.md`, `docs/MIGRATION-V2.md`, `docs/V2-READINESS.md`, and `docs/RELEASE-NOTES.md` aligned as future control-plane work lands. Keep all new work consistent with the locked decisions in `PRD.md`, `TRD.md`, and `API-DRAFT.md`: `src/` layout, multi-worker fan-out, worker-authored result JSON via `resultPath`, terminal state finalized in the exit callback, process-mode startup recovery terminates detached live PIDs instead of reattaching, artifact APIs stay sandboxed to repo-relative/orchestrator-managed paths, read-heavy state queries continue to use the new index/cache path instead of reintroducing directory-wide scans, dependency/version changes must preserve exact pinning plus frozen-lockfile verification, `untrusted_network` exposure must keep named/shared token auth plus path/metadata redaction intact, session/SQLite/WebSocket changes must remain additive to the v1 process-mode contract until an explicit cutover plan supersedes it, and distributed work must preserve executor-local drain semantics plus fencing-token monotonicity.

@@ -43,6 +43,7 @@ bun run ops:smoke:session:reattach:fixture
 실제 `codexcode` binary와 인증 환경이 준비된 운영/개발 머신에서 수동 실행한다.
 
 ```bash
+bun run ops:smoke:real:preflight
 bun run ops:smoke:real
 ```
 
@@ -51,6 +52,10 @@ bun run ops:smoke:real
 - CodexCode 인증 또는 provider 인증이 이미 유효
 - allowed repo root 밖 민감 디렉토리에서 실행하지 않음
 - binary preflight: `command -v codexcode && codexcode --help`
+- operator report template: [`docs/REAL-SMOKE-REPORT-TEMPLATE.md`](./REAL-SMOKE-REPORT-TEMPLATE.md)
+
+자세한 절차는 [`docs/REAL-SMOKE-RUNBOOK.md`](./REAL-SMOKE-RUNBOOK.md)를 따른다.
+Actual operator record: [`docs/REAL-SMOKE-REPORT-20260412.md`](./REAL-SMOKE-REPORT-20260412.md).
 
 ### 4) SQLite migration dry-run
 
@@ -66,6 +71,38 @@ bun run ops:migrate:dry-run
 - file rollback probe
 
 자세한 절차는 [`docs/MIGRATION-V2.md`](./MIGRATION-V2.md)를 따른다.
+
+### 5) Deep verification follow-up
+
+기본 ship gate와 분리된 post-ship soak/fault-injection 검증이다.
+
+```bash
+bun run ops:verify:deep:plan
+bun run ops:probe:soak:fixture
+bun run ops:probe:fault:fixture
+bun run ops:verify:deep:weekly
+```
+
+검증 범위:
+- 반복 실행 기반 lifecycle/state drift 관찰
+- timeout/fault path와 strict aggregation 유지 확인
+- manual multi-host failover 관측을 위한 별도 matrix 고정
+
+자세한 매트릭스는 [`docs/DEEP-VERIFICATION.md`](./DEEP-VERIFICATION.md)를 따른다.
+정기 실행 bundle은 `bun run ops:verify:deep:weekly`를 사용한다.
+
+### 6) Bun exit probe
+
+CLI 종료 지연 재현과 관찰 포인트를 shipped smoke와 분리한다.
+
+```bash
+bun run ops:probe:bun-exit
+bun run ops:probe:bun-exit:migration
+bun ./scripts/run-bun-exit-probe.ts --target migration-dry-run
+```
+
+자세한 probe 목적/해석은 [`docs/BUN-EXIT-PROBE.md`](./BUN-EXIT-PROBE.md)를 따른다.
+현재 이슈 초안과 실제 관찰 기록은 [`docs/BUN-EXIT-ISSUE-DRAFT-20260412.md`](./BUN-EXIT-ISSUE-DRAFT-20260412.md)에 고정했다.
 
 ## 운영 상태 확인 절차
 
@@ -234,7 +271,7 @@ same-session reattach smoke는 여기에 추가로 다음을 검증한다.
 ## Known Limitations
 
 - process-mode v1.x는 detached live worker를 reattach하지 않는다.
-- production-grade remote-network multi-host coordination은 아직 지원하지 않는다. 다만 lease-based single-leader **distributed prototype simulation**은 지원하며, shared SQLite coordinator/queue, `state_store_polling` event replay, `object_store_manifest` transport까지 seam 검증 범위로 포함한다.
+- production-grade remote-network multi-host coordination 전체는 아직 다음 단계가 남아 있다. 다만 현재는 lease-based single-leader **distributed prototype simulation**과, authenticated internal service path + `RemoteExecutorAgent` 기반 **remote worker-plane MVP**까지 지원한다.
 - session transcript/diagnostics는 단일 세션 append-only log 기준이며, 장기 보관/자동 truncate는 아직 수동 운영 정책에 의존한다.
 - named operator/service token + scope + repo/job/session boundary는 지원하지만 full multi-tenant RBAC는 아직 없다.
 - real `codexcode` smoke는 외부 모델/자격증명 상태에 따라 시간이 더 걸리거나 실패할 수 있다.
@@ -245,6 +282,7 @@ same-session reattach smoke는 여기에 추가로 다음을 검증한다.
 
 ```bash
 bun run ops:smoke:multihost:prototype
+bun run ops:smoke:multihost:service
 bun run ops:verify:distributed
 bun run release:distributed:check
 ```

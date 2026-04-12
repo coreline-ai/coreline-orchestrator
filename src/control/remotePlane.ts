@@ -1,8 +1,14 @@
 import type { ExecutionMode, WorkerCapabilityClass } from '../core/models.js'
 
 export type SchedulerStrategy = 'lease_based_single_leader'
-export type RemoteArtifactTransport = 'shared_filesystem' | 'object_store_manifest'
-export type RemoteResultTransport = 'shared_state_store' | 'object_store_manifest'
+export type RemoteArtifactTransport =
+  | 'shared_filesystem'
+  | 'object_store_manifest'
+  | 'object_store_service'
+export type RemoteResultTransport =
+  | 'shared_state_store'
+  | 'object_store_manifest'
+  | 'object_store_service'
 
 export interface RemoteJobClaimRequest {
   executorId: string
@@ -20,6 +26,7 @@ export interface RemoteJobClaimEnvelope {
   prompt: string
   executionMode: ExecutionMode
   capabilityClass: WorkerCapabilityClass
+  timeoutSeconds?: number
   resultPath?: string
   logPath: string
   artifactTransport: RemoteArtifactTransport
@@ -43,6 +50,7 @@ export interface RemoteWorkerResultEnvelope {
   status: 'completed' | 'failed' | 'canceled' | 'timed_out'
   summary: string
   resultPath?: string
+  logPath?: string
   artifactTransport: RemoteArtifactTransport
   resultTransport: RemoteResultTransport
   timestamp: string
@@ -63,6 +71,7 @@ export function buildRemoteJobClaimEnvelope(input: {
   prompt: string
   executionMode: ExecutionMode
   capabilityClass: WorkerCapabilityClass
+  timeoutSeconds?: number
   resultPath?: string
   logPath: string
   artifactTransport?: RemoteArtifactTransport
@@ -78,6 +87,9 @@ export function buildRemoteJobClaimEnvelope(input: {
     prompt: input.prompt,
     executionMode: input.executionMode,
     capabilityClass: input.capabilityClass,
+    ...(input.timeoutSeconds === undefined
+      ? {}
+      : { timeoutSeconds: input.timeoutSeconds }),
     ...(input.resultPath === undefined ? {} : { resultPath: input.resultPath }),
     logPath: input.logPath,
     artifactTransport: input.artifactTransport ?? 'shared_filesystem',

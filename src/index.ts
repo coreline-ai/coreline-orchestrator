@@ -190,6 +190,7 @@ export async function createOrchestratorRuntime(
     logIndex,
     startedAt,
     version: options.version ?? '0.3.0',
+    controlPlaneCoordinator,
   })
 
   const server =

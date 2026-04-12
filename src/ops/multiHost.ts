@@ -1,4 +1,5 @@
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { createServer } from 'node:net'
 import { join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 
@@ -10,6 +11,7 @@ import {
   buildRemoteJobClaimEnvelope,
   type SchedulerStrategy,
 } from '../control/remotePlane.js'
+import { RemoteExecutorAgent } from '../control/remoteExecutorAgent.js'
 import type { OrchestratorConfig } from '../config/config.js'
 import { JobStatus, type WorkerStatus } from '../core/models.js'
 import {
@@ -61,6 +63,18 @@ export interface MultiHostPrototypeResult {
   }
 }
 
+export interface DistributedWorkerPlaneResult {
+  service_url: string
+  repo_path: string
+  state_root_dir: string
+  first_job: MultiHostJobSnapshot
+  second_job: MultiHostJobSnapshot
+  registered_executors: string[]
+  artifact_transport: string
+  result_transport: string
+  remote_failover_observed: boolean
+}
+
 export async function runMultiHostPrototype(
   options: RunMultiHostPrototypeOptions,
 ): Promise<MultiHostPrototypeResult> {
@@ -86,6 +100,9 @@ export async function runMultiHostPrototype(
     stateStoreImportFromFile: false,
     stateStoreSqlitePath: 'state.sqlite',
     artifactTransportMode: 'object_store_manifest',
+    distributedServiceUrl: undefined,
+    distributedServiceToken: undefined,
+    workerPlaneBackend: 'local',
     maxActiveWorkers: 1,
     maxWriteWorkersPerRepo: 1,
     allowedRepoRoots: [repoPath],
@@ -220,6 +237,121 @@ export async function runMultiHostPrototype(
   }
 }
 
+export async function runDistributedWorkerPlanePrototype(
+  options: RunMultiHostPrototypeOptions,
+): Promise<DistributedWorkerPlaneResult> {
+  const rootDir = await mkdtemp(join(tmpdir(), 'coreline-orch-distributed-'))
+  const repoPath = join(rootDir, 'repo')
+  const stateRootDir = join(rootDir, '.orchestrator-state')
+  const workerBinary = resolve(options.workerBinary)
+  const apiPort = await findAvailablePort()
+
+  await mkdir(repoPath, { recursive: true })
+  await writeFile(
+    join(repoPath, 'README.md'),
+    '# distributed worker-plane prototype repo\n',
+    'utf8',
+  )
+
+  const config: OrchestratorConfig = {
+    apiHost: '127.0.0.1',
+    apiPort,
+    apiExposure: 'trusted_local',
+    apiAuthToken: undefined,
+    apiAuthTokens: [],
+    distributedServiceUrl: `http://127.0.0.1:${apiPort}`,
+    distributedServiceToken: 'distributed-service-token',
+    controlPlaneBackend: 'sqlite',
+    controlPlaneSqlitePath: 'control-plane.sqlite',
+    dispatchQueueBackend: 'sqlite',
+    dispatchQueueSqlitePath: 'dispatch-queue.sqlite',
+    eventStreamBackend: 'state_store_polling',
+    stateStoreBackend: 'sqlite',
+    stateStoreImportFromFile: false,
+    stateStoreSqlitePath: 'state.sqlite',
+    artifactTransportMode: 'object_store_service',
+    workerPlaneBackend: 'remote_agent_service',
+    maxActiveWorkers: 2,
+    maxWriteWorkersPerRepo: 1,
+    allowedRepoRoots: [repoPath],
+    orchestratorRootDir: '.orchestrator',
+    defaultTimeoutSeconds: 30,
+    workerBinary,
+    workerMode: 'process',
+  }
+
+  const runtime = await createOrchestratorRuntime({
+    config,
+    enableServer: true,
+    stateRootDir,
+    executorId: 'ctrl_main',
+    hostId: 'control-host',
+    version: '0.3.0-distributed-prototype',
+  })
+  const alpha = new RemoteExecutorAgent({
+    serviceUrl: config.distributedServiceUrl!,
+    serviceToken: config.distributedServiceToken!,
+    executorId: 'remote_alpha',
+    hostId: 'remote-host-alpha',
+    workerBinary,
+  })
+  const beta = new RemoteExecutorAgent({
+    serviceUrl: config.distributedServiceUrl!,
+    serviceToken: config.distributedServiceToken!,
+    executorId: 'remote_beta',
+    hostId: 'remote-host-beta',
+    workerBinary,
+  })
+
+  try {
+    await alpha.start()
+
+    const firstJob = await runtime.scheduler.submitJob({
+      title: 'Distributed worker-plane alpha',
+      repo: { path: repoPath },
+      prompt: { user: 'Run on remote alpha' },
+      execution: { mode: 'process', isolation: 'same-dir', maxWorkers: 1 },
+    })
+    const firstSnapshot = await waitForTerminalJob(runtime, firstJob.jobId)
+
+    await beta.start()
+    await alpha.stop()
+
+    const secondJob = await runtime.scheduler.submitJob({
+      title: 'Distributed worker-plane beta',
+      repo: { path: repoPath },
+      prompt: { user: 'Run on remote beta' },
+      execution: { mode: 'process', isolation: 'same-dir', maxWorkers: 1 },
+    })
+    const secondSnapshot = await waitForTerminalJob(runtime, secondJob.jobId)
+    const executors = await runtime.controlPlaneCoordinator.listExecutors({
+      includeStale: true,
+    })
+
+    return {
+      service_url: config.distributedServiceUrl!,
+      repo_path: repoPath,
+      state_root_dir: stateRootDir,
+      first_job: firstSnapshot,
+      second_job: secondSnapshot,
+      registered_executors: executors.map((executor) => executor.executorId),
+      artifact_transport: config.artifactTransportMode,
+      result_transport: 'object_store_service',
+      remote_failover_observed:
+        firstSnapshot.executor_id === 'remote_alpha' &&
+        secondSnapshot.executor_id === 'remote_beta' &&
+        executors.some((executor) => executor.executorId === 'remote_beta'),
+    }
+  } finally {
+    await alpha.stop().catch(() => undefined)
+    await beta.stop().catch(() => undefined)
+    await stopRuntime(runtime).catch(() => undefined)
+    if (!options.keepTemp) {
+      await rm(rootDir, { recursive: true, force: true })
+    }
+  }
+}
+
 async function waitForTerminalJob(
   runtime: OrchestratorRuntime,
   jobId: string,
@@ -260,6 +392,29 @@ async function waitForTerminalJob(
   }
 
   throw new Error(`Timed out waiting for job ${jobId} to complete.`)
+}
+
+async function findAvailablePort(): Promise<number> {
+  return await new Promise((resolvePort, reject) => {
+    const server = createServer()
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address()
+      if (address === null || typeof address === 'string') {
+        server.close(() => reject(new Error('Failed to resolve an available port.')))
+        return
+      }
+
+      server.close((error) => {
+        if (error !== undefined) {
+          reject(error)
+          return
+        }
+
+        resolvePort(address.port)
+      })
+    })
+  })
 }
 
 function isTerminalJobStatus(status: JobStatus): boolean {

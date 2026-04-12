@@ -1,4 +1,5 @@
 import { runSmokeScenario } from '../src/ops/smoke.js'
+import { collectCurrentProcessProbeSnapshot, formatProcessProbeLine } from '../src/ops/bunExitProbe.js'
 import type { StateStoreBackend } from '../src/config/config.js'
 import type { ExecutionMode } from '../src/core/models.js'
 
@@ -37,6 +38,29 @@ async function main(): Promise<void> {
   })
 
   console.log(JSON.stringify(result, null, 2))
+}
+
+async function flushStdout(): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    process.stdout.write('', (error) => {
+      if (error) {
+        reject(error)
+        return
+      }
+
+      resolve()
+    })
+  })
+}
+
+
+async function maybePrintExitProbeSnapshot(label: string): Promise<void> {
+  if (process.env.ORCH_EXIT_PROBE_SNAPSHOT !== '1') {
+    return
+  }
+
+  const snapshot = collectCurrentProcessProbeSnapshot(label)
+  console.error(formatProcessProbeLine(snapshot))
 }
 
 function parseArgs(argv: string[]): ParsedArgs {
@@ -171,3 +195,8 @@ function parseScenario(rawValue: string | undefined): 'success' | 'timeout' {
 }
 
 await main()
+await flushStdout()
+await maybePrintExitProbeSnapshot('run-ops-smoke')
+if (process.env.ORCH_SKIP_CLI_FORCE_EXIT !== '1') {
+  process.exit(0)
+}

@@ -251,6 +251,9 @@ export async function runSmokeScenario(
     stateStoreImportFromFile: options.stateStoreImportFromFile ?? false,
     stateStoreSqlitePath: options.stateStoreSqlitePath,
     artifactTransportMode: 'shared_filesystem',
+    distributedServiceUrl: undefined,
+    distributedServiceToken: undefined,
+    workerPlaneBackend: 'local',
     maxActiveWorkers: 1,
     maxWriteWorkersPerRepo: 1,
     allowedRepoRoots: [repoPath],
@@ -645,6 +648,7 @@ async function exerciseSessionRealtimeFlow(
 
       primarySocket.close()
       await waitForWebSocketClose(primarySocket)
+      primaryCollector.dispose()
 
       const detachedSession = await pollForSession(
         request,
@@ -763,6 +767,7 @@ async function exerciseSessionRealtimeFlow(
       } finally {
         secondarySocket.close()
         await waitForWebSocketClose(secondarySocket)
+        secondaryCollector.dispose()
       }
     }
   } finally {
@@ -770,6 +775,7 @@ async function exerciseSessionRealtimeFlow(
       primarySocket.close()
       await waitForWebSocketClose(primarySocket)
     }
+    primaryCollector.dispose()
   }
 
   const session = await expectJson<SmokeSessionDetailSnapshot>(
@@ -1095,8 +1101,13 @@ function createWebSocketCollector(socket: WebSocket) {
     reject: (error: Error) => void
     timer: ReturnType<typeof setTimeout>
   }> = []
+  let disposed = false
 
-  socket.addEventListener('message', (event) => {
+  const handleMessage = (event: MessageEvent) => {
+    if (disposed) {
+      return
+    }
+
     const payload = JSON.parse(String(event.data)) as unknown
     const waiterIndex = waiters.findIndex(({ predicate }) => predicate(payload))
 
@@ -1110,14 +1121,17 @@ function createWebSocketCollector(socket: WebSocket) {
     }
 
     bufferedMessages.push(payload)
-  })
+  }
 
-  socket.addEventListener('close', () => {
+  const handleClose = () => {
     for (const waiter of waiters.splice(0)) {
       clearTimeout(waiter.timer)
       waiter.reject(new Error('WebSocket closed before expected message arrived.'))
     }
-  })
+  }
+
+  socket.addEventListener('message', handleMessage)
+  socket.addEventListener('close', handleClose)
 
   return {
     async next<T = any>(
@@ -1145,6 +1159,19 @@ function createWebSocketCollector(socket: WebSocket) {
           timer,
         })
       })
+    },
+    dispose(): void {
+      if (disposed) {
+        return
+      }
+
+      disposed = true
+      socket.removeEventListener('message', handleMessage)
+      socket.removeEventListener('close', handleClose)
+      for (const waiter of waiters.splice(0)) {
+        clearTimeout(waiter.timer)
+      }
+      bufferedMessages.length = 0
     },
   }
 }

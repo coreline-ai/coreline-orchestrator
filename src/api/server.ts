@@ -2,17 +2,20 @@ import { Hono } from 'hono'
 import { websocket } from 'hono/bun'
 
 import type { OrchestratorConfig } from '../config/config.js'
+import type { ControlPlaneCoordinator } from '../control/coordination.js'
 import type { EventStream } from '../core/eventBus.js'
 import { LogIndex } from '../logs/logIndex.js'
 import type { SchedulerWorkerManager } from '../scheduler/scheduler.js'
 import { Scheduler } from '../scheduler/scheduler.js'
 import type { SessionManager } from '../sessions/sessionManager.js'
 import type { StateStore } from '../storage/types.js'
-import { applyApiMiddleware } from './middleware.js'
+import type { WorkerManager } from '../workers/workerManager.js'
+import { applyApiMiddleware, applyInternalApiMiddleware } from './middleware.js'
 import { createAuditRouter } from './routes/audit.js'
 import { createArtifactsRouter } from './routes/artifacts.js'
 import { createEventsRouter } from './routes/events.js'
 import { createHealthRouter } from './routes/health.js'
+import { createInternalRouter } from './routes/internal.js'
 import { createJobsRouter } from './routes/jobs.js'
 import { createRealtimeRouter } from './routes/realtime.js'
 import { createSessionsRouter } from './routes/sessions.js'
@@ -21,22 +24,24 @@ import { createWorkersRouter } from './routes/workers.js'
 export interface AppDependencies {
   config: OrchestratorConfig
   stateStore: StateStore
-  workerManager: SchedulerWorkerManager
+  workerManager: SchedulerWorkerManager &
+    Partial<Pick<WorkerManager, 'recordRemoteHeartbeat' | 'acceptRemoteResult'>>
   scheduler: Scheduler
   sessionManager: SessionManager
   eventBus: EventStream
   logIndex: LogIndex
   startedAt: string
   version?: string
+  controlPlaneCoordinator?: ControlPlaneCoordinator
 }
 
 export type OrchestratorServer = ReturnType<typeof Bun.serve>
 
 export function createApp(dependencies: AppDependencies): Hono {
   const app = new Hono()
-  applyApiMiddleware(app, dependencies.config)
 
   const api = new Hono()
+  applyApiMiddleware(api, dependencies.config)
   api.route(
     '/',
     createHealthRouter({
@@ -108,7 +113,21 @@ export function createApp(dependencies: AppDependencies): Hono {
     }),
   )
 
+  const internal = new Hono()
+  applyInternalApiMiddleware(internal, dependencies.config)
+  internal.route(
+    '/',
+    createInternalRouter({
+      config: dependencies.config,
+      stateStore: dependencies.stateStore,
+      scheduler: dependencies.scheduler,
+      workerManager: dependencies.workerManager,
+      controlPlaneCoordinator: dependencies.controlPlaneCoordinator,
+    }),
+  )
+
   app.route('/api/v1', api)
+  app.route('/internal/v1', internal)
   return app
 }
 

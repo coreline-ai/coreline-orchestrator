@@ -8,7 +8,7 @@ export async function ensureDir(dirPath: string): Promise<void> {
 
 export async function safeWriteFile(
   filePath: string,
-  data: string,
+  data: string | Uint8Array,
 ): Promise<void> {
   const resolvedFilePath = resolve(filePath)
   const parentDir = dirname(resolvedFilePath)
@@ -22,7 +22,11 @@ export async function safeWriteFile(
   const handle = await open(tempPath, 'w')
 
   try {
-    await handle.writeFile(data, 'utf8')
+    if (typeof data === 'string') {
+      await handle.writeFile(data, 'utf8')
+    } else {
+      await handle.writeFile(data)
+    }
     await handle.sync()
   } catch (error) {
     await handle.close()

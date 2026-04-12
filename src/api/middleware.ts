@@ -2,6 +2,7 @@ import type { Hono } from 'hono'
 
 import type { OrchestratorConfig } from '../config/config.js'
 import { resolveApiPrincipal } from './auth.js'
+import { requireDistributedServiceAuth } from './internalAuth.js'
 import {
   OrchestratorError,
 } from '../core/errors.js'
@@ -25,6 +26,39 @@ export function applyApiMiddleware(
     const normalized = normalizeErrorResponse(error, config)
     if (normalized.status === 401) {
       c.header('www-authenticate', 'Bearer realm="coreline-orchestrator"')
+    }
+
+    return c.json(normalized.body, {
+      status: normalized.status as 400 | 401 | 403 | 404 | 409 | 429 | 500 | 504,
+    })
+  })
+
+  app.notFound((c) =>
+    c.json(
+      {
+        error: {
+          code: 'NOT_FOUND',
+          message: `Route ${c.req.path} was not found.`,
+        },
+      },
+      404,
+    ),
+  )
+}
+
+export function applyInternalApiMiddleware(
+  app: Hono,
+  config: Pick<OrchestratorConfig, 'distributedServiceToken'>,
+): void {
+  app.use('*', async (c, next) => {
+    requireDistributedServiceAuth(c.req.raw, config)
+    await next()
+  })
+
+  app.onError((error, c) => {
+    const normalized = normalizeInternalErrorResponse(error)
+    if (normalized.status === 401) {
+      c.header('www-authenticate', 'Bearer realm="coreline-orchestrator-internal"')
     }
 
     return c.json(normalized.body, {
@@ -88,6 +122,45 @@ function normalizeErrorResponse(
           config.apiExposure === 'untrusted_network'
             ? 'Unexpected internal server error.'
             : error instanceof Error
+            ? error.message
+            : 'Unexpected internal server error.',
+      },
+    },
+  }
+}
+
+function normalizeInternalErrorResponse(error: unknown): {
+  status: number
+  body: {
+    error: {
+      code: string
+      message: string
+      details?: Record<string, string | number | boolean | null>
+    }
+  }
+} {
+  if (error instanceof OrchestratorError) {
+    return {
+      status: mapErrorStatus(error.code),
+      body: {
+        error: {
+          code: error.code,
+          message: error.message,
+          ...(error.details === undefined
+            ? {}
+            : { details: toSnakeCaseRecord(error.details) }),
+        },
+      },
+    }
+  }
+
+  return {
+    status: 500,
+    body: {
+      error: {
+        code: 'INTERNAL_ERROR',
+        message:
+          error instanceof Error
             ? error.message
             : 'Unexpected internal server error.',
       },

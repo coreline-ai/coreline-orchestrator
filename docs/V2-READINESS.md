@@ -18,19 +18,30 @@
 
 ## Verification Matrix
 
-| Check | Command / Method | Required |
-|---|---|---|
-| Core regression | `bun run verify` | yes |
-| Fixture success smoke | `bun run ops:smoke:fixture` | yes |
-| Fixture timeout smoke | `bun run ops:smoke:timeout:fixture` | yes |
-| Session/SQLite/WS fixture smoke | `bun run ops:smoke:v2:session:fixture` | yes |
-| SQLite migration dry-run | `bun run ops:migrate:dry-run` | yes |
-| Distributed prototype smoke | `bun run ops:smoke:multihost:prototype` | recommended |
-| Combined v2 ops check | `bun run ops:verify:v2` | recommended |
-| Combined release gate | `bun run release:v2:check` | recommended |
-| Combined distributed ops check | `bun run ops:verify:distributed` | recommended |
-| Combined distributed prototype gate | `bun run release:distributed:check` | recommended |
-| Real process-mode smoke | `bun run ops:smoke:real` | yes on operator machine |
+| Check | Command / Method | Class | Required |
+|---|---|---|---|
+| Core regression | `bun run verify` | auto | yes |
+| Fixture success smoke | `bun run ops:smoke:fixture` | auto | yes |
+| Fixture timeout smoke | `bun run ops:smoke:timeout:fixture` | auto | yes |
+| Session/SQLite/WS fixture smoke | `bun run ops:smoke:v2:session:fixture` | auto | yes |
+| SQLite migration dry-run | `bun run ops:migrate:dry-run` | auto | yes |
+| Distributed prototype smoke | `bun run ops:smoke:multihost:prototype` | auto | recommended |
+| Combined v2 ops check | `bun run ops:verify:v2` | auto | recommended |
+| Combined release gate | `bun run release:v2:check` | auto | recommended |
+| Combined distributed ops check | `bun run ops:verify:distributed` | auto | recommended |
+| Combined distributed prototype gate | `bun run release:distributed:check` | auto | recommended |
+| Real process-mode preflight | `bun run ops:smoke:real:preflight` | manual | recommended |
+| Real process-mode smoke | `bun run ops:smoke:real` | manual | yes on operator machine |
+| Deep verification plan | `bun run ops:verify:deep:plan` | deep | recommended post-ship |
+| Deep soak/fault fixture probes | `bun run ops:probe:soak:fixture`, `bun run ops:probe:fault:fixture` | deep | recommended post-ship |
+| Weekly deep verification bundle | `bun run ops:verify:deep:weekly` | deep | recommended post-ship |
+| Bun exit probe | `bun run ops:probe:bun-exit` | deep | optional diagnostic |
+
+## Verification Boundary
+
+- **auto**: CI-safe or deterministic scripts that should stay green in the normal shipped bundle.
+- **manual**: operator-machine checks that depend on local auth/binary/provider state.
+- **deep**: soak/fault-injection/runtime diagnostics kept outside the default ship gate.
 
 ## Ship / No-Ship Criteria
 
@@ -65,6 +76,7 @@
 - `bun run ops:migrate:dry-run` ✅
 - `bun run ops:smoke:real` ✅
 - `bun run ops:smoke:multihost:prototype` ✅
+- `bun run ops:smoke:multihost:service` ✅
 - `bun run ops:verify:distributed` ✅
 
 추가 메모:
@@ -74,3 +86,11 @@
 - post-v2 Phase 4 기준으로 local executor registration, scheduler lease, worker heartbeat seam, and heartbeat-aware reconcile suppression are shipped behind the in-memory coordinator contract.
 - post-v2 Phase 5 기준으로 lease-based single-leader multi-host prototype, detached runtime helpers, `src/control/remotePlane.ts` remote worker-plane contract, and `bun run ops:smoke:multihost:prototype` verification are shipped for seam validation.
 - distributed follow-up 기준으로 shared sqlite coordinator/queue, polling-backed event replay, manifest-backed artifact/log/result projection, `ops:verify:distributed` verification, and the composed `release:distributed:check` gate command are shipped for the current prototype boundary.
+- production distributed roadmap 기준으로 service-backed coordinator/event/object-store paths, remote executor network worker-plane smoke (`ops:smoke:multihost:service`), and the expanded distributed verification bundle are shipped.
+
+
+## 2026-04-12 Follow-up Closure
+
+- manual real-worker smoke gap closed: see `docs/REAL-SMOKE-REPORT-20260412.md`
+- deep verification cadence fixed: weekly/pre-release bundle = `bun run ops:verify:deep:weekly`
+- Bun exit-delay evidence accumulated: see `docs/BUN-EXIT-PROBE.md` and `docs/BUN-EXIT-ISSUE-DRAFT-20260412.md`

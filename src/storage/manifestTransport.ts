@@ -25,18 +25,16 @@ export async function publishManifestedFile(input: {
   kind: string
   createdAt?: string
 }): Promise<ObjectStoreManifest> {
-  const objectStoreRoot = join(input.repoPath, input.orchestratorRootDir, 'object-store')
-  const extension = extname(input.sourcePath) || '.bin'
-  const blobPath = join(objectStoreRoot, 'blobs', `${input.artifactId}${extension}`)
-  const manifestPath = join(
-    objectStoreRoot,
-    'manifests',
-    `${input.artifactId}.manifest.json`,
-  )
+  const blobPaths = buildBlobPaths({
+    repoPath: input.repoPath,
+    orchestratorRootDir: input.orchestratorRootDir,
+    artifactId: input.artifactId,
+    sourceName: input.sourcePath,
+  })
 
-  await ensureDir(dirname(blobPath))
-  await copyFile(input.sourcePath, blobPath)
-  const fileStat = await stat(blobPath)
+  await ensureDir(dirname(blobPaths.blobPath))
+  await copyFile(input.sourcePath, blobPaths.blobPath)
+  const fileStat = await stat(blobPaths.blobPath)
   const manifest: ObjectStoreManifest = {
     version: 1,
     transport: 'object_store_manifest',
@@ -44,14 +42,65 @@ export async function publishManifestedFile(input: {
     kind: input.kind,
     createdAt: input.createdAt ?? new Date().toISOString(),
     sourcePath: resolve(input.sourcePath),
-    manifestPath,
-    blobPath,
-    publicPath: relative(resolve(input.repoPath), manifestPath),
+    manifestPath: blobPaths.manifestPath,
+    blobPath: blobPaths.blobPath,
+    publicPath: relative(resolve(input.repoPath), blobPaths.manifestPath),
     contentType: inferContentType(input.sourcePath),
     sizeBytes: fileStat.size,
   }
 
-  await safeWriteFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`)
+  await safeWriteFile(
+    blobPaths.manifestPath,
+    `${JSON.stringify(manifest, null, 2)}\n`,
+  )
+  return manifest
+}
+
+export async function publishManifestedBuffer(input: {
+  repoPath: string
+  orchestratorRootDir: string
+  buffer: Uint8Array | ArrayBuffer
+  artifactId: string
+  kind: string
+  sourceName?: string
+  createdAt?: string
+  contentType?: string
+  sourcePath?: string
+}): Promise<ObjectStoreManifest> {
+  const blobPaths = buildBlobPaths({
+    repoPath: input.repoPath,
+    orchestratorRootDir: input.orchestratorRootDir,
+    artifactId: input.artifactId,
+    sourceName: input.sourceName,
+  })
+  const buffer =
+    input.buffer instanceof ArrayBuffer
+      ? Buffer.from(input.buffer)
+      : Buffer.from(input.buffer)
+
+  await ensureDir(dirname(blobPaths.blobPath))
+  await safeWriteFile(blobPaths.blobPath, buffer)
+
+  const manifest: ObjectStoreManifest = {
+    version: 1,
+    transport: 'object_store_manifest',
+    artifactId: input.artifactId,
+    kind: input.kind,
+    createdAt: input.createdAt ?? new Date().toISOString(),
+    sourcePath: input.sourcePath ?? resolve(blobPaths.blobPath),
+    manifestPath: blobPaths.manifestPath,
+    blobPath: blobPaths.blobPath,
+    publicPath: relative(resolve(input.repoPath), blobPaths.manifestPath),
+    contentType:
+      input.contentType ??
+      inferContentType(input.sourceName ?? blobPaths.blobPath),
+    sizeBytes: buffer.byteLength,
+  }
+
+  await safeWriteFile(
+    blobPaths.manifestPath,
+    `${JSON.stringify(manifest, null, 2)}\n`,
+  )
   return manifest
 }
 
@@ -97,6 +146,35 @@ export async function resolveManifestedFilePath(
 
 export function isManifestFilePath(filePath: string | undefined): boolean {
   return typeof filePath === 'string' && filePath.endsWith('.manifest.json')
+}
+
+function buildBlobPaths(input: {
+  repoPath: string
+  orchestratorRootDir: string
+  artifactId: string
+  sourceName?: string
+}): {
+  blobPath: string
+  manifestPath: string
+} {
+  const objectStoreRoot = join(
+    input.repoPath,
+    input.orchestratorRootDir,
+    'object-store',
+  )
+  const extension = extname(input.sourceName ?? '') || '.bin'
+  const blobPath = join(
+    objectStoreRoot,
+    'blobs',
+    `${input.artifactId}${extension}`,
+  )
+  const manifestPath = join(
+    objectStoreRoot,
+    'manifests',
+    `${input.artifactId}.manifest.json`,
+  )
+
+  return { blobPath, manifestPath }
 }
 
 function inferContentType(filePath: string): string {

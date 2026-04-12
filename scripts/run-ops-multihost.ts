@@ -1,11 +1,20 @@
-import { runMultiHostPrototype } from '../src/ops/multiHost.js'
+import {
+  runDistributedWorkerPlanePrototype,
+  runMultiHostPrototype,
+} from '../src/ops/multiHost.js'
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2))
-  const result = await runMultiHostPrototype({
-    workerBinary: args.workerBinary,
-    keepTemp: args.keepTemp,
-  })
+  const result =
+    args.mode === 'service'
+      ? await runDistributedWorkerPlanePrototype({
+          workerBinary: args.workerBinary,
+          keepTemp: args.keepTemp,
+        })
+      : await runMultiHostPrototype({
+          workerBinary: args.workerBinary,
+          keepTemp: args.keepTemp,
+        })
 
   console.log(JSON.stringify(result, null, 2))
 }
@@ -13,9 +22,11 @@ async function main(): Promise<void> {
 function parseArgs(argv: string[]): {
   workerBinary: string
   keepTemp: boolean
+  mode: 'prototype' | 'service'
 } {
   let workerBinary = ''
   let keepTemp = false
+  let mode: 'prototype' | 'service' = 'prototype'
 
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index]
@@ -27,6 +38,15 @@ function parseArgs(argv: string[]): {
 
     if (argument === '--keep-temp') {
       keepTemp = true
+      continue
+    }
+
+    if (argument === '--mode') {
+      const value = argv[index + 1]
+      if (value === 'prototype' || value === 'service') {
+        mode = value
+      }
+      index += 1
     }
   }
 
@@ -37,6 +57,7 @@ function parseArgs(argv: string[]): {
   return {
     workerBinary,
     keepTemp,
+    mode,
   }
 }
 

@@ -2,6 +2,10 @@ import { dirname, isAbsolute, join, resolve } from 'node:path'
 
 import type { OrchestratorConfig } from '../config/config.js'
 import type { ControlPlaneCoordinator } from '../control/coordination.js'
+import type {
+  RemoteWorkerHeartbeatEnvelope,
+  RemoteWorkerResultEnvelope,
+} from '../control/remotePlane.js'
 import { generateWorkerId } from '../core/ids.js'
 import {
   JobStatus,
@@ -37,6 +41,7 @@ import { ensureDir } from '../storage/safeWrite.js'
 import {
   publishManifestedFile,
 } from '../storage/manifestTransport.js'
+import { ObjectStoreServiceTransport } from '../storage/objectStoreServiceTransport.js'
 import { safeWriteFile } from '../storage/safeWrite.js'
 import type { StateStore, UpdateSessionRuntimeInput } from '../storage/types.js'
 import type { RuntimeAdapter, RuntimeExitResult, RuntimeHandle, WorkerRuntimeSpec } from '../runtime/types.js'
@@ -318,6 +323,252 @@ export class WorkerManager {
     }
 
     await this.#runtimeAdapter.stop(handle)
+  }
+
+  async claimRemoteWorker(
+    workerId: string,
+    executorId: string,
+    dispatchFencingToken?: string,
+  ): Promise<WorkerRecord> {
+    const worker = await this.#getRequiredWorker(workerId)
+    const job = await this.#getRequiredJob(worker.jobId)
+    const now = new Date().toISOString()
+
+    const claimedWorker: WorkerRecord =
+      worker.status === WorkerStatus.Created
+        ? {
+            ...worker,
+            status: WorkerStatus.Starting,
+            updatedAt: now,
+            metadata: {
+              ...worker.metadata,
+              remoteExecutorId: executorId,
+              remoteDispatchFencingToken: dispatchFencingToken ?? '',
+              remoteClaimedAt: now,
+            },
+          }
+        : {
+            ...worker,
+            updatedAt: now,
+            metadata: {
+              ...worker.metadata,
+              remoteExecutorId: executorId,
+              remoteDispatchFencingToken: dispatchFencingToken ?? '',
+              remoteClaimedAt: worker.metadata?.remoteClaimedAt ?? now,
+            },
+          }
+
+    await this.#stateStore.updateWorker(claimedWorker)
+    await this.#advanceJobToStatus(job, JobStatus.Dispatching)
+    await this.#publishEvent(
+      'worker.state',
+      {
+        status: claimedWorker.status,
+        remoteExecutorId: executorId,
+      },
+      {
+        jobId: claimedWorker.jobId,
+        workerId: claimedWorker.workerId,
+      },
+    )
+
+    return claimedWorker
+  }
+
+  async recordRemoteHeartbeat(
+    envelope: RemoteWorkerHeartbeatEnvelope,
+  ): Promise<WorkerRecord> {
+    const worker = await this.#getRequiredWorker(envelope.workerId)
+    const now = envelope.timestamp
+    const targetStatus =
+      envelope.status === 'active'
+        ? WorkerStatus.Active
+        : envelope.status === 'finishing'
+        ? WorkerStatus.Finishing
+        : WorkerStatus.Starting
+
+    const updatedWorker =
+      worker.status === targetStatus
+        ? {
+            ...worker,
+            updatedAt: now,
+            metadata: {
+              ...worker.metadata,
+              remoteExecutorId: envelope.executorId,
+              remoteAssignmentFencingToken: envelope.assignmentFencingToken ?? '',
+              remoteHeartbeatStatus: envelope.status,
+              remoteHeartbeatAt: now,
+            },
+          }
+        : {
+            ...worker,
+            status: targetStatus,
+            startedAt:
+              targetStatus === WorkerStatus.Active
+                ? worker.startedAt ?? now
+                : worker.startedAt,
+            updatedAt: now,
+            metadata: {
+              ...worker.metadata,
+              remoteExecutorId: envelope.executorId,
+              remoteAssignmentFencingToken: envelope.assignmentFencingToken ?? '',
+              remoteHeartbeatStatus: envelope.status,
+              remoteHeartbeatAt: now,
+            },
+          }
+
+    if (
+      worker.status !== targetStatus &&
+      !isTerminalWorkerStatus(worker.status)
+    ) {
+      assertValidWorkerTransition(worker.status, targetStatus)
+    }
+
+    await this.#stateStore.updateWorker(updatedWorker)
+    if (this.#controlPlane !== undefined) {
+      await this.#controlPlane.coordinator.upsertWorkerHeartbeat({
+        workerId: envelope.workerId,
+        jobId: envelope.jobId,
+        executorId: envelope.executorId,
+        repoPath: updatedWorker.repoPath,
+        ttlMs: this.#controlPlane.heartbeatTtlMs ?? 5_000,
+        now,
+        metadata: {
+          runtimeMode: updatedWorker.runtimeMode,
+          heartbeatStatus: envelope.status,
+        },
+      })
+    }
+
+    if (targetStatus === WorkerStatus.Active) {
+      const job = await this.#getRequiredJob(updatedWorker.jobId)
+      await this.#advanceJobToStatus(job, JobStatus.Running)
+    }
+
+    await this.#publishEvent(
+      'worker.state',
+      { status: updatedWorker.status, remoteExecutorId: envelope.executorId },
+      { jobId: updatedWorker.jobId, workerId: updatedWorker.workerId },
+    )
+
+    return updatedWorker
+  }
+
+  async acceptRemoteResult(
+    envelope: RemoteWorkerResultEnvelope,
+  ): Promise<WorkerRecord> {
+    const worker = await this.#getRequiredWorker(envelope.workerId)
+    if (isTerminalWorkerStatus(worker.status)) {
+      return worker
+    }
+
+    const now = envelope.timestamp
+    const finishingWorker =
+      worker.status === WorkerStatus.Finishing
+        ? worker
+        : {
+            ...worker,
+            status: WorkerStatus.Finishing,
+            updatedAt: now,
+            metadata: {
+              ...worker.metadata,
+              remoteExecutorId: envelope.executorId,
+              remoteAssignmentFencingToken: envelope.assignmentFencingToken ?? '',
+            },
+          }
+
+    if (worker.status !== WorkerStatus.Finishing) {
+      assertValidWorkerTransition(worker.status, WorkerStatus.Finishing)
+      await this.#stateStore.updateWorker(finishingWorker)
+      await this.#publishEvent(
+        'worker.state',
+        { status: finishingWorker.status, remoteExecutorId: envelope.executorId },
+        { jobId: finishingWorker.jobId, workerId: finishingWorker.workerId },
+      )
+    }
+
+    if (this.#controlPlane !== undefined) {
+      await this.#controlPlane.coordinator.releaseWorkerHeartbeat({
+        workerId: envelope.workerId,
+        executorId: envelope.executorId,
+        now,
+        reason: 'remote_result_published',
+      })
+    }
+
+    const terminalStatus = mapExecutionStatusToWorkerStatus(envelope.status)
+    const collectedResult =
+      envelope.resultPath === undefined
+        ? null
+        : await this.#resultAggregator.collectWorkerResult(
+            finishingWorker.workerId,
+            envelope.resultPath,
+          )
+
+    let workerResult =
+      collectedResult ??
+      this.#createFallbackWorkerResult(
+        finishingWorker,
+        envelope.status,
+        { exitCode: envelope.status === 'completed' ? 0 : 1, signal: null },
+        { timedOut: envelope.status === 'timed_out' } as RuntimeHandle,
+      )
+    if (collectedResult === null) {
+      workerResult = {
+        ...workerResult,
+        status: envelope.status,
+        summary: envelope.summary,
+        finishedAt: now,
+      }
+    }
+
+    this.#workerResults.set(finishingWorker.workerId, workerResult)
+
+    const terminalWorker: WorkerRecord = {
+      ...finishingWorker,
+      status: terminalStatus,
+      resultPath: envelope.resultPath ?? finishingWorker.resultPath,
+      logPath: envelope.logPath ?? finishingWorker.logPath,
+      finishedAt: now,
+      updatedAt: now,
+      metadata: {
+        ...finishingWorker.metadata,
+        remoteExecutorId: envelope.executorId,
+        remoteAssignmentFencingToken: envelope.assignmentFencingToken ?? '',
+        remoteResultPublishedAt: now,
+      },
+    }
+
+    await this.#stateStore.updateWorker(terminalWorker)
+    if (this.#sessionManager !== undefined) {
+      await this.#sessionManager.closeSessionForWorker(
+        terminalWorker,
+        'remote_worker_terminal',
+      )
+    }
+
+    await this.#publishEvent(
+      'worker.result',
+      {
+        status: workerResult.status,
+        summary: workerResult.summary,
+      },
+      {
+        jobId: terminalWorker.jobId,
+        workerId: terminalWorker.workerId,
+      },
+    )
+    await this.#publishEvent(
+      'worker.state',
+      { status: terminalWorker.status, remoteExecutorId: envelope.executorId },
+      {
+        jobId: terminalWorker.jobId,
+        workerId: terminalWorker.workerId,
+      },
+    )
+
+    await this.#queueJobAggregation(terminalWorker.jobId)
+    return terminalWorker
   }
 
   async attachSessionRuntime(
@@ -638,7 +889,7 @@ export class WorkerManager {
 
     let publishedResultPath = finishingWorker.resultPath
     let publishedLogPath = finishingWorker.logPath
-    if (this.#config.artifactTransportMode === 'object_store_manifest') {
+    if (this.#config.artifactTransportMode !== 'shared_filesystem') {
       workerResult = {
         ...workerResult,
         artifacts: await this.#publishWorkerArtifacts(
@@ -842,7 +1093,7 @@ export class WorkerManager {
     this.#jobResults.set(jobId, aggregatedResult)
     let publishedJobResultPath = aggregatingJob.resultPath
     if (
-      this.#config.artifactTransportMode === 'object_store_manifest' &&
+      this.#config.artifactTransportMode !== 'shared_filesystem' &&
       aggregatingJob.resultPath !== undefined
     ) {
       publishedJobResultPath = await this.#publishManagedFile(
@@ -1455,6 +1706,26 @@ export class WorkerManager {
     kind: string,
     createdAt: string,
   ): Promise<string> {
+    if (
+      this.#config.artifactTransportMode === 'object_store_service' &&
+      this.#config.distributedServiceUrl !== undefined &&
+      this.#config.distributedServiceToken !== undefined
+    ) {
+      const manifest = await new ObjectStoreServiceTransport({
+        baseUrl: this.#config.distributedServiceUrl,
+        token: this.#config.distributedServiceToken,
+      }).publishFile({
+        repoPath,
+        orchestratorRootDir: this.#config.orchestratorRootDir,
+        sourcePath,
+        artifactId,
+        kind,
+        createdAt,
+      })
+
+      return manifest.manifestPath
+    }
+
     const manifest = await publishManifestedFile({
       repoPath,
       orchestratorRootDir: this.#config.orchestratorRootDir,
@@ -1480,18 +1751,17 @@ export class WorkerManager {
         }
 
         try {
-          const manifest = await publishManifestedFile({
-            repoPath: worker.repoPath,
-            orchestratorRootDir: this.#config.orchestratorRootDir,
+          const publishedPath = await this.#publishManagedFile(
+            worker.repoPath,
             sourcePath,
-            artifactId: artifact.artifactId,
-            kind: artifact.kind,
+            artifact.artifactId,
+            artifact.kind,
             createdAt,
-          })
+          )
 
           return {
             ...artifact,
-            path: manifest.publicPath,
+            path: publishedPath,
           }
         } catch {
           return artifact
@@ -1523,5 +1793,19 @@ function mapJobResultToJobStatus(status: TerminalExecutionStatus): JobStatus {
     case 'timed_out':
     case 'failed':
       return JobStatus.Failed
+  }
+}
+
+function mapExecutionStatusToWorkerStatus(
+  status: TerminalExecutionStatus,
+): WorkerStatus {
+  switch (status) {
+    case 'completed':
+      return WorkerStatus.Finished
+    case 'canceled':
+      return WorkerStatus.Canceled
+    case 'timed_out':
+    case 'failed':
+      return WorkerStatus.Failed
   }
 }

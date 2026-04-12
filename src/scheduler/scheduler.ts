@@ -1,7 +1,15 @@
 import { join } from 'node:path'
 
 import type { OrchestratorConfig } from '../config/config.js'
-import type { ControlPlaneCoordinator } from '../control/coordination.js'
+import type {
+  ControlPlaneCoordinator,
+  DispatchLeaseRecord,
+} from '../control/coordination.js'
+import {
+  buildRemoteJobClaimEnvelope,
+  type RemoteJobClaimEnvelope,
+  type RemoteJobClaimRequest,
+} from '../control/remotePlane.js'
 import { InvalidStateTransitionError, JobNotFoundError } from '../core/errors.js'
 import { createEvent } from '../core/events.js'
 import type { EventPublisher } from '../core/eventBus.js'
@@ -47,6 +55,11 @@ export interface SchedulerWorkerManager {
   createWorker(jobRecord: JobRecord, prompt: string): Promise<WorkerRecord>
   startWorker(worker: WorkerRecord): Promise<unknown>
   stopWorker(workerId: string, reason?: string): Promise<void>
+  claimRemoteWorker?(
+    workerId: string,
+    executorId: string,
+    dispatchFencingToken?: string,
+  ): Promise<WorkerRecord>
 }
 
 export interface SchedulerDependencies {
@@ -219,6 +232,10 @@ export class Scheduler {
       return
     }
 
+    if (this.#config.workerPlaneBackend === 'remote_agent_service') {
+      return
+    }
+
     this.#dispatching = true
 
     try {
@@ -320,22 +337,140 @@ export class Scheduler {
     }
   }
 
+  async claimRemoteJob(
+    request: RemoteJobClaimRequest,
+  ): Promise<RemoteJobClaimEnvelope | null> {
+    if (
+      this.#config.workerPlaneBackend !== 'remote_agent_service' ||
+      this.#workerManager.claimRemoteWorker === undefined
+    ) {
+      return null
+    }
+
+    const lease = await this.#acquireDispatchLeaseRecord()
+    if (lease === null) {
+      return null
+    }
+
+    const queuedJobs = this.#queue.list()
+    const activeWorkers = await this.#getActiveWorkers()
+    let activeWorkerCount = activeWorkers.length
+
+    for (const queuedJob of queuedJobs) {
+      const currentJob = await this.#stateStore.getJob(queuedJob.jobId)
+      if (currentJob === null || isTerminalJobStatus(currentJob.status)) {
+        this.#queue.remove(queuedJob.jobId)
+        continue
+      }
+
+      const jobWorkers = await this.#stateStore.listWorkers({
+        jobId: currentJob.jobId,
+      })
+      const activeWorkersForJob = jobWorkers.filter(isSchedulableWorker)
+
+      if (activeWorkersForJob.length >= currentJob.maxWorkers) {
+        this.#queue.remove(currentJob.jobId)
+        continue
+      }
+
+      if (
+        !this.#capacityPolicy.canDispatch(
+          activeWorkerCount,
+          this.#config.maxActiveWorkers,
+        )
+      ) {
+        return null
+      }
+
+      if (this.#conflictPolicy.hasWriteConflict(currentJob, activeWorkers)) {
+        continue
+      }
+
+      this.#queue.remove(currentJob.jobId)
+
+      try {
+        const preparedJob = await this.#advanceJobToStatus(
+          currentJob,
+          JobStatus.Preparing,
+        )
+        const prompt = this.#buildPrompt(preparedJob)
+        const worker = await this.#workerManager.createWorker(preparedJob, prompt)
+        const claimedWorker = await this.#workerManager.claimRemoteWorker(
+          worker.workerId,
+          request.executorId,
+          lease.fencingToken,
+        )
+
+        activeWorkerCount += 1
+        activeWorkers.push(claimedWorker)
+
+        const latestJob =
+          (await this.#stateStore.getJob(preparedJob.jobId)) ?? preparedJob
+        const latestWorkers = await this.#stateStore.listWorkers({
+          jobId: latestJob.jobId,
+        })
+
+        if (latestWorkers.filter(isSchedulableWorker).length < latestJob.maxWorkers) {
+          this.#queue.enqueue(latestJob)
+        }
+
+        return buildRemoteJobClaimEnvelope({
+          workerId: claimedWorker.workerId,
+          jobId: claimedWorker.jobId,
+          dispatchFencingToken: lease.fencingToken,
+          repoPath: claimedWorker.repoPath,
+          prompt,
+          executionMode: claimedWorker.runtimeMode,
+          capabilityClass: claimedWorker.capabilityClass,
+          timeoutSeconds: latestJob.timeoutSeconds,
+          resultPath: claimedWorker.resultPath,
+          logPath: claimedWorker.logPath,
+          artifactTransport:
+            this.#config.artifactTransportMode === 'object_store_service'
+              ? 'object_store_service'
+              : this.#config.artifactTransportMode,
+          resultTransport:
+            this.#config.artifactTransportMode === 'object_store_service'
+              ? 'object_store_service'
+              : this.#config.artifactTransportMode === 'object_store_manifest'
+              ? 'object_store_manifest'
+              : 'shared_state_store',
+        })
+      } catch (error) {
+        await this.#handleDispatchFailure(currentJob, error)
+        return null
+      }
+    }
+
+    return null
+  }
+
   getQueue(): DispatchQueue {
     return this.#queue
   }
 
   async #acquireDispatchLease(): Promise<boolean> {
+    return (await this.#acquireDispatchLeaseRecord()) !== null
+  }
+
+  async #acquireDispatchLeaseRecord(): Promise<DispatchLeaseRecord | null> {
     if (this.#controlPlane === undefined) {
-      return true
+      return {
+        leaseKey: 'scheduler:dispatch',
+        ownerId: 'local',
+        fencingToken: 'local:dispatch',
+        acquiredAt: new Date().toISOString(),
+        heartbeatAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + Math.max(this.#dispatchIntervalMs * 3, 3_000)).toISOString(),
+        version: 1,
+      }
     }
 
-    const lease = await this.#controlPlane.coordinator.acquireLease({
+    return await this.#controlPlane.coordinator.acquireLease({
       leaseKey: this.#controlPlane.leaseKey ?? 'scheduler:dispatch',
       ownerId: this.#controlPlane.executorId,
       ttlMs: this.#controlPlane.leaseTtlMs ?? Math.max(this.#dispatchIntervalMs * 3, 3_000),
     })
-
-    return lease !== null
   }
 
   async #handleDispatchFailure(job: JobRecord, error: unknown): Promise<void> {

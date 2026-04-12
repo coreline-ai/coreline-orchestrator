@@ -844,9 +844,11 @@ The minimum remote execution contract is frozen in `src/control/remotePlane.ts` 
 - artifact transport modes:
   - `shared_filesystem`
   - `object_store_manifest`
+  - `object_store_service`
 - result transport modes:
   - `shared_state_store`
   - `object_store_manifest`
+  - `object_store_service`
 
 This contract is intentionally small: it defines what a future remote executor must report, without yet forcing a network protocol or broker choice.
 
@@ -861,7 +863,7 @@ The current prototype is a simulation, not a full remote-network deployment. It 
 - `object_store_manifest` projection for worker/job result paths, logs, and artifact references
 - shared filesystem only as the current blob backing store behind those manifests
 
-That means the prototype now validates shared coordinator/queue semantics, polling-based event replay, and remote-friendly artifact addressing, but it still stops short of a production remote-network deployment. The remaining gaps are broker-backed event transport, an external coordinator service, and a true network object store.
+The shipped follow-up now also includes an authenticated internal service surface (`/internal/v1/*`), `ServiceControlPlaneCoordinator`, `ServicePollingEventStream`, `ObjectStoreServiceTransport`, and `RemoteExecutorAgent`, so the codebase validates both the original shared-SQLite prototype path and a service-backed remote worker-plane MVP. It still stops short of a fully externalized broker/object-store/control service deployment.
 
 ### Current decision
 

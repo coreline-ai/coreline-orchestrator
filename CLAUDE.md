@@ -41,6 +41,11 @@ bun run typecheck    # 타입 체크만
 bun run check:release-hygiene  # package/lockfile/script 릴리스 정책 검증
 bun run verify       # 테스트 + 타입체크 + 빌드 + 릴리스 정책 검증
 bun run release:check  # frozen-lockfile + 전체 릴리스 검증
+bun run ops:smoke:real:preflight  # real-worker smoke 사전 점검
+bun run ops:verify:deep:plan  # post-ship deep verification matrix 출력
+bun run ops:probe:soak:fixture  # soak-lite fixture harness
+bun run ops:probe:fault:fixture  # fault-lite fixture harness
+bun run ops:probe:bun-exit  # Bun 종료 지연 repro/probe
 ```
 
 ## API 보안 규칙
@@ -271,12 +276,18 @@ post-v2 follow-up 계획은 `dev-plan/implement_20260411_135150.md`를 따른다
 | Access Control & Exposure Hardening | 완료 |
 | Real Runtime Verification & Ops Readiness | 완료 |
 
-현재 다음 우선순위 (`dev-plan/implement_20260411_225207.md`):
-- Phase 1: External Coordinator Service & Fencing Enforcement — 미시작
-- Phase 2: Durable Broker-backed Queue / Event Stream — 미시작
-- Phase 3: Network Object-store Transport Cutover — 미시작
-- Phase 4: Remote Executor Network Worker-plane MVP — 미시작
-- Phase 5: Production Cutover / Rollback / Failover Readiness — 미시작
+현재 follow-up 검증 우선순위 (`dev-plan/implement_20260412_084602.md`):
+- Phase 1: Manual real-worker smoke 운영 절차 고정 — 완료
+- Phase 2: Performance / soak / fault-injection 테스트 계획 및 최소 harness — 완료
+- Phase 3: Bun 종료 지연 repro / probe 정리 — 완료
+- Phase 4: Release / Operations / Readiness 문서 동기화 — 완료
+
+직전 production distributed roadmap (`dev-plan/implement_20260411_225207.md`):
+- Phase 1: External Coordinator Service & Fencing Enforcement — 완료
+- Phase 2: Durable Broker-backed Queue / Event Stream — 완료
+- Phase 3: Network Object-store Transport Cutover — 완료
+- Phase 4: Remote Executor Network Worker-plane MVP — 완료
+- Phase 5: Production Cutover / Rollback / Failover Readiness — 완료
 
 직전 distributed follow-up (`dev-plan/implement_20260411_210712.md`):
 - Phase 1: External Coordinator & Fencing Contract Freeze — 완료
@@ -295,9 +306,10 @@ post-v2 follow-up 계획은 `dev-plan/implement_20260411_135150.md`를 따른다
 - dependency/devDependency는 exact version만 허용
 - lockfile 재현성 검증은 `bun run install:locked`
 - release 전 표준 검증은 `bun run release:check`
-- 운영 smoke 명령은 `bun run ops:smoke:fixture`, `bun run ops:smoke:timeout:fixture`, `bun run ops:smoke:v2:session:fixture`, `bun run ops:smoke:session:reattach:fixture`, `bun run ops:smoke:real`, `bun run ops:smoke:multihost:prototype`
+- 운영 smoke 명령은 `bun run ops:smoke:fixture`, `bun run ops:smoke:timeout:fixture`, `bun run ops:smoke:v2:session:fixture`, `bun run ops:smoke:session:reattach:fixture`, `bun run ops:smoke:real:preflight`, `bun run ops:smoke:real`, `bun run ops:smoke:multihost:prototype`
 - migration rehearsal은 `bun run ops:migrate:dry-run`, 통합 gate는 `bun run release:v2:check`
-- distributed prototype gate는 `bun run ops:verify:distributed`, `bun run release:distributed:check`
+- deep verification follow-up은 `bun run ops:verify:deep:plan`, `bun run ops:probe:soak:fixture`, `bun run ops:probe:fault:fixture`, `bun run ops:probe:bun-exit`, `bun run ops:probe:bun-exit:migration`, `bun run ops:verify:deep:weekly`
+- distributed prototype/service gate는 `bun run ops:verify:distributed`, `bun run release:distributed:check`
 
 노출 제어 규칙:
 - external exposure에서는 API token 없이는 `/api/v1/*`와 SSE 접근 불가
@@ -319,6 +331,11 @@ v2 진행 상태:
 - distributed follow-up Phase 3 완료: `object_store_manifest` transport, manifest-aware result/log/artifact readers, and manifest-backed terminal worker/job path publication
 - distributed follow-up Phase 4 완료: remote worker-plane fencing metadata, executor-local drain semantics in `stopRuntime()`, and shared coordinator/queue/event wiring in the multi-host prototype
 - distributed follow-up Phase 5 완료: distributed verification commands (`ops:verify:distributed`, `release:distributed:check`), failover smoke validation, and operations/architecture/doc sync
+- production distributed roadmap Phase 1~5 완료: `ServiceControlPlaneCoordinator`, authenticated `/internal/v1/*` service surface, `ServicePollingEventStream`, `ObjectStoreServiceTransport`, `RemoteExecutorAgent`, `ops:smoke:multihost:service`, and service-backed distributed verification
+- follow-up verification plan 완료: real-worker preflight/report workflow, deep verification matrix + minimal harness, Bun exit probe helper, and docs/readiness sync
+- actual operator real-smoke record captured: `docs/REAL-SMOKE-REPORT-20260412.md`
+- weekly deep verification policy fixed: `bun run ops:verify:deep:weekly`
+- Bun exit-delay issue draft/evidence accumulated: `docs/BUN-EXIT-ISSUE-DRAFT-20260412.md`
 
 ## 설계 문서
 

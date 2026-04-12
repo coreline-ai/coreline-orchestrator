@@ -34,4 +34,23 @@ describe('PollingStateStoreEventStream', () => {
       await rm(rootDir, { recursive: true, force: true })
     }
   })
+
+  test('tolerates missing event log files during teardown polling', async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), 'coreline-events-missing-'))
+    const stateStore = new FileStateStore(rootDir)
+    await stateStore.initialize()
+    const eventStream = new PollingStateStoreEventStream({
+      stateStore,
+      pollIntervalMs: 10,
+      pollLimit: 20,
+    })
+
+    const unsubscribe = eventStream.subscribe({ offset: 0 }, () => {
+      // noop
+    })
+
+    await rm(rootDir, { recursive: true, force: true })
+    await Bun.sleep(40)
+    unsubscribe()
+  })
 })

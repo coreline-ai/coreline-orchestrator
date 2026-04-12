@@ -106,6 +106,11 @@ export class PollingStateStoreEventStream implements EventStream {
             callback(event)
           }
         })
+        .catch((error: unknown) => {
+          if (!isIgnorablePollingError(error)) {
+            console.error('[PollingStateStoreEventStream] listEvents failed', error)
+          }
+        })
         .finally(() => {
           polling = false
         })
@@ -140,4 +145,14 @@ function matchesFilter(event: OrchestratorEvent, filter: EventFilter): boolean {
   }
 
   return filter.eventType === event.eventType
+}
+
+
+function isIgnorablePollingError(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) {
+    return false
+  }
+
+  const candidate = error as { code?: string }
+  return candidate.code === 'ENOENT'
 }

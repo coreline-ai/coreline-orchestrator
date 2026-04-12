@@ -25,7 +25,8 @@ This repository has completed the v1 implementation, post-v1 P0 hardening, and v
 - `dev-plan/implement_20260411_210712.md`: distributed control-plane follow-up
 - `dev-plan/implement_20260411_225207.md`: production distributed roadmap
 - `dev-plan/implement_20260412_075941.md`: full-test validation plan and verification log
-- `dev-plan/implement_20260412_084602.md`: follow-up manual/deep/Bun-probe verification plan (current)
+- `dev-plan/implement_20260412_084602.md`: follow-up manual/deep/Bun-probe verification plan
+- `dev-plan/implement_20260412_160606.md`: next production operating-model roadmap (current)
 
 Code lives under `src/`. Core domain, config/storage/isolation, runtime/logs, worker lifecycle, sessions, scheduler, API/SSE/WebSocket, ops (smoke/migration), and reconcile/shutdown modules are implemented. Treat `dist/` as generated output. The first worker-client implementation is CodexCode CLI via the `codexcode` binary.
 
@@ -96,7 +97,7 @@ Restrict repositories through an allowlist, prefer worktrees for write tasks, an
 
 ## Current Status & Handoff
 
-As of **2026-04-12**, the full v1 roadmap including Reconciliation & Shutdown is complete, the post-v1 P0 hardening patch set is complete, the full post-P0 P1/P2 hardening backlog through Phase 5 is complete, v2 Phase 1~5 are complete, the post-v2 follow-up in `dev-plan/implement_20260411_135150.md` is complete through Phase 5, the distributed control-plane follow-up in `dev-plan/implement_20260411_210712.md` is complete through Phase 5, the production distributed roadmap in `dev-plan/implement_20260411_225207.md` is complete through Phase 5, the full-test validation plan in `dev-plan/implement_20260412_075941.md` is complete through Phase 4, and the follow-up verification plan in `dev-plan/implement_20260412_084602.md` is complete through Phase 4.
+As of **2026-04-12**, the full v1 roadmap including Reconciliation & Shutdown is complete, the post-v1 P0 hardening patch set is complete, the full post-P0 P1/P2 hardening backlog through Phase 5 is complete, v2 Phase 1~5 are complete, the post-v2 follow-up in `dev-plan/implement_20260411_135150.md` is complete through Phase 5, the distributed control-plane follow-up in `dev-plan/implement_20260411_210712.md` is complete through Phase 5, the production distributed roadmap in `dev-plan/implement_20260411_225207.md` is complete through Phase 5, the full-test validation plan in `dev-plan/implement_20260412_075941.md` is complete through Phase 4, and the follow-up verification plan in `dev-plan/implement_20260412_084602.md` is complete through Phase 4, and the next production operating-model roadmap is staged in `dev-plan/implement_20260412_160606.md`.
 
 Baseline confirmed:
 

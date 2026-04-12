@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-04-12
+
+### feat(distributed): ship service control plane and ops verification follow-ups (`dc1aa02`)
+- shipped the service-backed distributed control-plane path: internal authenticated coordinator/event/object-store routes, `ServiceControlPlaneCoordinator`, `ServicePollingEventStream`, `ObjectStoreServiceTransport`, and `RemoteExecutorAgent`
+- completed operator follow-up verification with actual real-worker smoke records, weekly deep verification cadence, and Bun exit-delay probe/evidence capture
+- synchronized production distributed roadmap completion and shipped service-mode multi-host verification/operations guidance
+
+### chore(release): publish v0.3.0 notes and next roadmap (`a65a69e`)
+- published `v0.3.0` release notes, bumped project versioning metadata, and added the next staged roadmap after the v2/distributed milestone
+- synchronized release docs, API draft references, and plan pointers before the latest distributed service follow-up landed
+
 ## 2026-04-11
 
 ### feat(v2): freeze session api and migration guardrails (`209376a`)

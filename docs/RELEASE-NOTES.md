@@ -1,5 +1,39 @@
 # Release Notes
 
+## 2026-04-12 — post-v0.3.0 distributed service follow-up
+
+### Highlights
+- `v0.3.0` 태그는 유지하면서, mainline에는 service-backed distributed control-plane 경로와 운영 검증 후속이 추가로 ship되었다.
+- internal authenticated control-plane surface, service polling event stream, object-store service upload path, and remote executor network worker-plane smoke가 main 기준으로 정리되었다.
+- manual real-worker smoke record, weekly deep verification cadence, and Bun exit-delay probe/evidence workflow가 운영 기준으로 고정되었다.
+
+### Distributed service follow-up
+- `ServiceControlPlaneCoordinator`가 internal authenticated coordinator service path를 사용해 executor registration, lease, heartbeat, fencing 흐름을 remote path로 확장한다.
+- `ServicePollingEventStream`은 service path 기반 replay/live catch-up 경로를 제공한다.
+- `ObjectStoreServiceTransport`는 shared-filesystem/manifest fallback을 유지하면서 network object-store upload path를 추가한다.
+- `RemoteExecutorAgent`와 `ops:smoke:multihost:service`는 remote executor network worker-plane smoke를 검증한다.
+
+### Operations follow-up closure
+- actual operator-machine real smoke record: `docs/REAL-SMOKE-REPORT-20260412.md`
+- weekly deep verification bundle: `bun run ops:verify:deep:weekly`
+- Bun exit-delay evidence/draft: `docs/BUN-EXIT-PROBE.md`, `docs/BUN-EXIT-ISSUE-DRAFT-20260412.md`
+
+### Verification
+- `bun test`
+- `bun run build`
+- `bun run ops:verify:distributed`
+- `bun run ops:verify:deep:weekly`
+- `bun run ops:smoke:real`
+
+### Next roadmap
+- source plan: `dev-plan/implement_20260412_160606.md`
+- next workstream moves from shipped service/distributed follow-up to production operating model hardening:
+  - production backend/provider contract freeze
+  - observability / SLI/SLO / alerting hardening
+  - executor identity / transport auth / secret rotation
+  - load / soak / chaos / canary automation
+  - GA readiness / release gate / operator automation
+
 ## 2026-04-11 — v0.3.0 session runtime + distributed prototype
 
 ### Highlights

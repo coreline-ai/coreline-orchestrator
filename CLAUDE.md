@@ -48,6 +48,17 @@ bun run ops:probe:fault:fixture  # fault-lite fixture harness
 bun run ops:probe:bun-exit  # Bun 종료 지연 repro/probe
 ```
 
+## 다음 로드맵
+
+- 현재까지의 distributed/service follow-up과 운영 검증 후속은 완료되었다.
+- 다음 작업 기준 문서: `dev-plan/implement_20260412_160606.md`
+- 다음 우선순위:
+  1. production backend/provider contract freeze
+  2. observability / SLI/SLO / alerting hardening
+  3. executor identity / transport auth / secret rotation
+  4. load / soak / chaos / canary automation
+  5. GA readiness / release gate / operator automation
+
 ## API 보안 규칙
 
 - `ORCH_API_EXPOSURE=trusted_local`이 기본값이다.

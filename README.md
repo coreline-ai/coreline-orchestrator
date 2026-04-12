@@ -582,13 +582,13 @@ coreline-orchestrator/
 - remote worker plane 최소 계약은 `src/control/remotePlane.ts`에 고정되어 있고 dispatch/assignment fencing token을 포함한다
 - `stopRuntime()`은 **local executor drain**만 수행하고, `stopOrchestrator()`만 singleton global shutdown semantics를 유지한다
 
-### Next Roadmap ([dev-plan](dev-plan/implement_20260411_225207.md))
+### Next Roadmap ([dev-plan](dev-plan/implement_20260412_160606.md))
 
-- ✅ Phase 1: External Coordinator Service & Fencing Enforcement
-- ✅ Phase 2: Durable Broker-backed Queue / Event Stream
-- ✅ Phase 3: Network Object-store Transport Cutover
-- ✅ Phase 4: Remote Executor Network Worker-plane MVP
-- ✅ Phase 5: Production Cutover / Rollback / Failover Readiness
+- 🔲 Phase 1: Production backend/provider contract freeze
+- 🔲 Phase 2: Observability / SLI/SLO / alerting hardening
+- 🔲 Phase 3: Executor identity / transport auth / secret rotation
+- 🔲 Phase 4: Load / soak / chaos / canary automation
+- 🔲 Phase 5: GA readiness / release gate / operator automation
 
 ---
 
@@ -623,6 +623,7 @@ coreline-orchestrator/
 | [`dev-plan/implement_20260411_225207.md`](dev-plan/implement_20260411_225207.md) | Production distributed roadmap (external coordinator / broker / object store / remote executor) |
 | [`dev-plan/implement_20260412_075941.md`](dev-plan/implement_20260412_075941.md) | Full-test validation plan and verification record |
 | [`dev-plan/implement_20260412_084602.md`](dev-plan/implement_20260412_084602.md) | Follow-up manual/deep/Bun-probe verification plan |
+| [`dev-plan/implement_20260412_160606.md`](dev-plan/implement_20260412_160606.md) | Next production operating-model roadmap |
 | [`CLAUDE.md`](CLAUDE.md) | AI agent project context |
 
 ---

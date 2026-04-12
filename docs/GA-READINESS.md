@@ -55,3 +55,20 @@ bun run release:ga:check
 3. **Operational discipline**
    - 자동화 gate만 통과했다고 ship 되는 것이 아니다.
    - release notes, runbook, incident/rollback artifact 업데이트까지 완료해야 한다.
+
+
+## Post-GA Extension Gate
+
+정식 `v1.0 RC` 직전에는 아래 bundle을 사용한다.
+
+```bash
+bun run release:v1:check
+```
+
+포함 범위:
+- `bun run release:ga:check`
+- `bun run ops:providers:cutover`
+- `bun run ops:dr:plan`
+- `bun run ops:capacity:baseline`
+- `bun run ops:audit:handoff`
+- `bun run ops:readiness:v1-rc`

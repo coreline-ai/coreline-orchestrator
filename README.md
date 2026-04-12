@@ -228,6 +228,9 @@ curl http://localhost:3100/api/v1/jobs/<job_id>/results
 | `POST` | `/workers/:id/restart` | 🔄 Restart a worker |
 | `GET` | `/workers/:id/events` | 📡 SSE event stream |
 | `WS` | `/workers/:id/ws` | ⚡ WebSocket event stream |
+| `GET` | `/distributed/providers` | 🧭 Provider/backend contract matrix |
+| `GET` | `/distributed/cutover` | 🚦 Provider cutover envelopes, canary, and degraded-mode policy |
+| `GET` | `/distributed/readiness` | 🩺 Distributed readiness / alert summary |
 
 > `POST /workers/:id/restart`는 process-mode에서 **같은 worker 실행을 재부착/재시작하는 API가 아니다**.  
 > terminal worker를 기준으로 **새 retry job/worker를 생성하는 `retry_job_clone` 동작**이다.
@@ -582,21 +585,17 @@ coreline-orchestrator/
 - remote worker plane 최소 계약은 `src/control/remotePlane.ts`에 고정되어 있고 dispatch/assignment fencing token을 포함한다
 - `stopRuntime()`은 **local executor drain**만 수행하고, `stopOrchestrator()`만 singleton global shutdown semantics를 유지한다
 
-### Current Roadmap ([dev-plan](dev-plan/implement_20260412_160606.md))
+### Current Roadmap ([dev-plan](dev-plan/implement_20260412_190027.md))
 
-- ✅ Phase 1: Production backend/provider contract freeze
-- ✅ Phase 2: Observability / SLI/SLO / alerting hardening
-- ✅ Phase 3: Executor identity / transport auth / secret rotation
-- ✅ Phase 4: Load / soak / chaos / canary automation
-- ✅ Phase 5: GA readiness / release gate / operator automation
+- ✅ Phase 1: Provider cutover profile & degraded-mode freeze
+- ✅ Phase 2: Backup / restore / disaster recovery rehearsal
+- ✅ Phase 3: Capacity baseline / load envelope / scaling policy
+- ✅ Phase 4: Audit export / retention / compliance handoff
+- ✅ Phase 5: v1.0 RC / post-GA monitoring automation
 
-### Next Roadmap ([dev-plan](dev-plan/implement_20260412_190027.md))
+### Next Roadmap
 
-- 🔲 Phase 1: Provider cutover profile & degraded-mode freeze
-- 🔲 Phase 2: Backup / restore / disaster recovery rehearsal
-- 🔲 Phase 3: Capacity baseline / load envelope / scaling policy
-- 🔲 Phase 4: Audit export / retention / compliance handoff
-- 🔲 Phase 5: v1.0 RC / post-GA monitoring automation
+- _TBD — generate the next staged roadmap after the v1.0 RC / post-GA monitoring closure_
 
 ---
 
@@ -616,6 +615,11 @@ coreline-orchestrator/
 | [`docs/MIGRATION-V2.md`](docs/MIGRATION-V2.md) | File→SQLite dry-run, cutover, and rollback procedure |
 | [`docs/V2-READINESS.md`](docs/V2-READINESS.md) | v2 compatibility matrix, release checklist, and ship gates |
 | [`docs/GA-READINESS.md`](docs/GA-READINESS.md) | GA ship/no-ship gate, operator artifacts, and remaining risks |
+| [`docs/PROVIDER-CUTOVER.md`](docs/PROVIDER-CUTOVER.md) | Provider cutover envelopes, canary promotion, and degraded-mode rules |
+| [`docs/DISASTER-RECOVERY.md`](docs/DISASTER-RECOVERY.md) | Snapshot/restore rehearsal targets and DR restore flow |
+| [`docs/CAPACITY-BASELINE.md`](docs/CAPACITY-BASELINE.md) | Queue/session/executor envelope and scaling decision tree |
+| [`docs/AUDIT-HANDOFF.md`](docs/AUDIT-HANDOFF.md) | Audit export format, retention policy, and compliance handoff checklist |
+| [`docs/RC-READINESS.md`](docs/RC-READINESS.md) | v1.0 RC gate bundle and post-GA monitoring cadence |
 | [`docs/INCIDENT-CHECKLIST.md`](docs/INCIDENT-CHECKLIST.md) | Incident triage/evidence/recovery checklist |
 | [`docs/ROLLBACK-TEMPLATE.md`](docs/ROLLBACK-TEMPLATE.md) | Rollback execution template and recovery checklist |
 | [`docs/DEEP-VERIFICATION.md`](docs/DEEP-VERIFICATION.md) | Post-ship soak/fault-injection matrix and minimal harness |
@@ -635,7 +639,7 @@ coreline-orchestrator/
 | [`dev-plan/implement_20260412_075941.md`](dev-plan/implement_20260412_075941.md) | Full-test validation plan and verification record |
 | [`dev-plan/implement_20260412_084602.md`](dev-plan/implement_20260412_084602.md) | Follow-up manual/deep/Bun-probe verification plan |
 | [`dev-plan/implement_20260412_160606.md`](dev-plan/implement_20260412_160606.md) | Production operating-model roadmap (completed) |
-| [`dev-plan/implement_20260412_190027.md`](dev-plan/implement_20260412_190027.md) | Next post-GA production cutover roadmap |
+| [`dev-plan/implement_20260412_190027.md`](dev-plan/implement_20260412_190027.md) | Provider cutover / DR / capacity / audit / RC roadmap (completed) |
 | [`CLAUDE.md`](CLAUDE.md) | AI agent project context |
 
 ---
@@ -678,6 +682,7 @@ bun run ops:readiness:ga  # GA ship/no-ship checklist export
 bun run release:v2:check  # Full release gate plus v2 ops verification
 bun run release:distributed:check  # v2 gate + distributed prototype/service verification
 bun run release:ga:check  # Distributed gate + RC verification + GA readiness bundle
+bun run release:v1:check  # Post-GA cutover + DR + capacity + audit + RC bundle
 bun run verify       # Tests + typecheck + build + release hygiene checks
 bun run release:check  # Frozen-lockfile install + full release verification
 ```

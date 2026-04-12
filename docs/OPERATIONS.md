@@ -399,3 +399,22 @@ bun run release:ga:check
 - [`docs/GA-READINESS.md`](./GA-READINESS.md)
 - [`docs/INCIDENT-CHECKLIST.md`](./INCIDENT-CHECKLIST.md)
 - [`docs/ROLLBACK-TEMPLATE.md`](./ROLLBACK-TEMPLATE.md)
+
+
+### 7) Provider cutover / DR / capacity / RC bundle
+
+```bash
+bun run ops:providers:cutover
+bun run ops:dr:plan
+bun run ops:capacity:baseline
+bun run ops:audit:handoff
+bun run ops:readiness:v1-rc
+bun run release:v1:check
+```
+
+검증 범위:
+- provider latency/error envelope와 degraded-mode fallback 확인
+- snapshot / restore rehearsal target 및 operator artifact 고정
+- queue/session/executor capacity baseline과 scaling recommendation 확인
+- audit export / retention / compliance handoff 확인
+- v1.0 RC gate와 post-GA monitoring cadence 확인

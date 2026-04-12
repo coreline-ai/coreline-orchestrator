@@ -39,6 +39,7 @@
 | Release-candidate deep bundle | `bun run ops:verify:rc` | deep | recommended pre-release |
 | GA readiness export | `bun run ops:readiness:ga` | auto | recommended pre-release |
 | GA ship gate | `bun run release:ga:check` | auto | recommended pre-release |
+| v1.0 RC extension gate | `bun run release:v1:check` | auto | recommended pre-v1.0 |
 | Bun exit probe | `bun run ops:probe:bun-exit` | deep | optional diagnostic |
 
 ## Verification Boundary
@@ -105,3 +106,12 @@
 - distributed named credential / token-id contract shipped for coordinator, event stream, object store, and remote executor paths
 - release-candidate probes fixed: `ops:probe:canary:distributed`, `ops:probe:chaos:distributed`, `ops:verify:rc`
 - GA readiness docs + gate fixed: `docs/GA-READINESS.md`, `bun run release:ga:check`
+
+
+## 2026-04-12 Post-GA Production Cutover Closure
+
+- provider cutover envelopes, canary/rollback commands, and degraded-mode matrix are fixed in `docs/PROVIDER-CUTOVER.md`
+- DR rehearsal helpers and snapshot/restore target planning are fixed in `docs/DISASTER-RECOVERY.md` and `bun run ops:dr:plan`
+- capacity baseline and scaling policy are fixed in `docs/CAPACITY-BASELINE.md` and `bun run ops:capacity:baseline`
+- audit export / retention / compliance handoff are fixed in `docs/AUDIT-HANDOFF.md` and `bun run ops:audit:handoff`
+- v1.0 RC / post-GA monitoring cadence is fixed in `docs/RC-READINESS.md` and `bun run release:v1:check`

@@ -584,11 +584,11 @@ coreline-orchestrator/
 
 ### Next Roadmap ([dev-plan](dev-plan/implement_20260412_160606.md))
 
-- 🔲 Phase 1: Production backend/provider contract freeze
-- 🔲 Phase 2: Observability / SLI/SLO / alerting hardening
-- 🔲 Phase 3: Executor identity / transport auth / secret rotation
-- 🔲 Phase 4: Load / soak / chaos / canary automation
-- 🔲 Phase 5: GA readiness / release gate / operator automation
+- ✅ Phase 1: Production backend/provider contract freeze
+- ✅ Phase 2: Observability / SLI/SLO / alerting hardening
+- ✅ Phase 3: Executor identity / transport auth / secret rotation
+- ✅ Phase 4: Load / soak / chaos / canary automation
+- ✅ Phase 5: GA readiness / release gate / operator automation
 
 ---
 
@@ -607,6 +607,9 @@ coreline-orchestrator/
 | [`docs/REAL-SMOKE-REPORT-20260412.md`](docs/REAL-SMOKE-REPORT-20260412.md) | Actual operator-machine real-worker smoke record |
 | [`docs/MIGRATION-V2.md`](docs/MIGRATION-V2.md) | File→SQLite dry-run, cutover, and rollback procedure |
 | [`docs/V2-READINESS.md`](docs/V2-READINESS.md) | v2 compatibility matrix, release checklist, and ship gates |
+| [`docs/GA-READINESS.md`](docs/GA-READINESS.md) | GA ship/no-ship gate, operator artifacts, and remaining risks |
+| [`docs/INCIDENT-CHECKLIST.md`](docs/INCIDENT-CHECKLIST.md) | Incident triage/evidence/recovery checklist |
+| [`docs/ROLLBACK-TEMPLATE.md`](docs/ROLLBACK-TEMPLATE.md) | Rollback execution template and recovery checklist |
 | [`docs/DEEP-VERIFICATION.md`](docs/DEEP-VERIFICATION.md) | Post-ship soak/fault-injection matrix and minimal harness |
 | [`docs/BUN-EXIT-PROBE.md`](docs/BUN-EXIT-PROBE.md) | Bun CLI exit-delay repro/probe notes and workaround boundary |
 | [`docs/BUN-EXIT-ISSUE-DRAFT-20260412.md`](docs/BUN-EXIT-ISSUE-DRAFT-20260412.md) | Current Bun exit-delay issue draft with captured evidence |
@@ -623,7 +626,7 @@ coreline-orchestrator/
 | [`dev-plan/implement_20260411_225207.md`](dev-plan/implement_20260411_225207.md) | Production distributed roadmap (external coordinator / broker / object store / remote executor) |
 | [`dev-plan/implement_20260412_075941.md`](dev-plan/implement_20260412_075941.md) | Full-test validation plan and verification record |
 | [`dev-plan/implement_20260412_084602.md`](dev-plan/implement_20260412_084602.md) | Follow-up manual/deep/Bun-probe verification plan |
-| [`dev-plan/implement_20260412_160606.md`](dev-plan/implement_20260412_160606.md) | Next production operating-model roadmap |
+| [`dev-plan/implement_20260412_160606.md`](dev-plan/implement_20260412_160606.md) | Production operating-model roadmap (completed) |
 | [`CLAUDE.md`](CLAUDE.md) | AI agent project context |
 
 ---
@@ -656,11 +659,16 @@ bun run ops:verify:distributed  # Prototype + service worker-plane distributed v
 bun run ops:verify:deep:plan  # Post-ship deep verification matrix output
 bun run ops:probe:soak:fixture  # Minimal soak-lite fixture harness
 bun run ops:probe:fault:fixture  # Minimal fault-injection fixture harness
+bun run ops:probe:canary:distributed  # Service-backed distributed canary probe
+bun run ops:probe:chaos:distributed  # Lease/failover chaos-lite probe
 bun run ops:probe:bun-exit  # Bun exit-delay repro/probe helper
 bun run ops:probe:bun-exit:migration  # Migration path exit-delay probe
 bun run ops:verify:deep:weekly  # Post-ship weekly deep verification bundle
+bun run ops:verify:rc  # Release-candidate deep verification bundle
+bun run ops:readiness:ga  # GA ship/no-ship checklist export
 bun run release:v2:check  # Full release gate plus v2 ops verification
 bun run release:distributed:check  # v2 gate + distributed prototype/service verification
+bun run release:ga:check  # Distributed gate + RC verification + GA readiness bundle
 bun run verify       # Tests + typecheck + build + release hygiene checks
 bun run release:check  # Frozen-lockfile install + full release verification
 ```
@@ -700,7 +708,7 @@ bun run release:check  # Frozen-lockfile install + full release verification
   - event stream: `state_store_polling`
   - artifact transport: `object_store_service`
   - worker plane: `remote_agent_service`
-  - distributed service auth: `ORCH_DISTRIBUTED_SERVICE_URL` + `ORCH_DISTRIBUTED_SERVICE_TOKEN`
+  - distributed service auth: `ORCH_DISTRIBUTED_SERVICE_URL` + (`ORCH_DISTRIBUTED_SERVICE_TOKEN` 또는 `ORCH_DISTRIBUTED_SERVICE_TOKENS` + `ORCH_DISTRIBUTED_SERVICE_TOKEN_ID`)
 
 ### Operations Smoke
 
@@ -718,16 +726,19 @@ bun run release:check  # Frozen-lockfile install + full release verification
   - `bun run ops:verify:deep:plan`
   - `bun run ops:probe:soak:fixture`
   - `bun run ops:probe:fault:fixture`
+  - `bun run ops:probe:canary:distributed`
+  - `bun run ops:probe:chaos:distributed`
   - `bun run ops:probe:bun-exit`
   - `bun run ops:probe:bun-exit:migration`
   - `bun run ops:verify:deep:weekly`
+  - `bun run ops:verify:rc`
 - distributed prototype verification:
   - `bun run ops:smoke:multihost:prototype`
   - `bun run ops:smoke:multihost:service`
   - `bun run ops:verify:distributed`
 - manual real-worker smoke:
   - `bun run ops:smoke:real`
-- 상세 운영 절차는 [`docs/OPERATIONS.md`](docs/OPERATIONS.md), cutover/rollback 절차는 [`docs/MIGRATION-V2.md`](docs/MIGRATION-V2.md), ship 기준은 [`docs/V2-READINESS.md`](docs/V2-READINESS.md)를 참고합니다.
+- 상세 운영 절차는 [`docs/OPERATIONS.md`](docs/OPERATIONS.md), cutover/rollback 절차는 [`docs/MIGRATION-V2.md`](docs/MIGRATION-V2.md), ship 기준은 [`docs/V2-READINESS.md`](docs/V2-READINESS.md)와 [`docs/GA-READINESS.md`](docs/GA-READINESS.md)를 참고합니다.
 
 ### Code Conventions
 

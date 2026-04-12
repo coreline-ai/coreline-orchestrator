@@ -865,6 +865,13 @@ The current prototype is a simulation, not a full remote-network deployment. It 
 
 The shipped follow-up now also includes an authenticated internal service surface (`/internal/v1/*`), `ServiceControlPlaneCoordinator`, `ServicePollingEventStream`, `ObjectStoreServiceTransport`, and `RemoteExecutorAgent`, so the codebase validates both the original shared-SQLite prototype path and a service-backed remote worker-plane MVP. It still stops short of a fully externalized broker/object-store/control service deployment.
 
+The current production operating-model hardening layer adds two explicit surfaces on top of that MVP:
+
+- provider contract matrix (`src/control/providerProfiles.ts`, `GET /api/v1/distributed/providers`)
+- distributed readiness / alert surface (`src/control/distributedReadiness.ts`, `GET /api/v1/distributed/readiness`)
+
+These surfaces freeze degraded-mode fallback rules and operator-facing thresholds without changing the underlying single-leader scheduling model. Named distributed credentials (`ORCH_DISTRIBUTED_SERVICE_TOKENS` + `ORCH_DISTRIBUTED_SERVICE_TOKEN_ID`) are now first-class and coexist with the original shared token fallback so credential rotation can advance additively.
+
 ### Current decision
 
 Stay with the internal lease-based prototype for now. Re-evaluate an external coordinator, shared durable queue/event stream, or remote artifact transport only when:

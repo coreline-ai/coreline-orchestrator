@@ -35,6 +35,10 @@
 | Deep verification plan | `bun run ops:verify:deep:plan` | deep | recommended post-ship |
 | Deep soak/fault fixture probes | `bun run ops:probe:soak:fixture`, `bun run ops:probe:fault:fixture` | deep | recommended post-ship |
 | Weekly deep verification bundle | `bun run ops:verify:deep:weekly` | deep | recommended post-ship |
+| Distributed canary / chaos probes | `bun run ops:probe:canary:distributed`, `bun run ops:probe:chaos:distributed` | deep | recommended pre-release |
+| Release-candidate deep bundle | `bun run ops:verify:rc` | deep | recommended pre-release |
+| GA readiness export | `bun run ops:readiness:ga` | auto | recommended pre-release |
+| GA ship gate | `bun run release:ga:check` | auto | recommended pre-release |
 | Bun exit probe | `bun run ops:probe:bun-exit` | deep | optional diagnostic |
 
 ## Verification Boundary
@@ -94,3 +98,10 @@
 - manual real-worker smoke gap closed: see `docs/REAL-SMOKE-REPORT-20260412.md`
 - deep verification cadence fixed: weekly/pre-release bundle = `bun run ops:verify:deep:weekly`
 - Bun exit-delay evidence accumulated: see `docs/BUN-EXIT-PROBE.md` and `docs/BUN-EXIT-ISSUE-DRAFT-20260412.md`
+
+## 2026-04-12 Production Operating-Model Closure
+
+- provider contract matrix + readiness alert surface shipped: `GET /api/v1/distributed/providers`, `GET /api/v1/distributed/readiness`
+- distributed named credential / token-id contract shipped for coordinator, event stream, object store, and remote executor paths
+- release-candidate probes fixed: `ops:probe:canary:distributed`, `ops:probe:chaos:distributed`, `ops:verify:rc`
+- GA readiness docs + gate fixed: `docs/GA-READINESS.md`, `bun run release:ga:check`

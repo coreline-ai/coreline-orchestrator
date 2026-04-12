@@ -46,18 +46,18 @@ bun run ops:verify:deep:plan  # post-ship deep verification matrix 출력
 bun run ops:probe:soak:fixture  # soak-lite fixture harness
 bun run ops:probe:fault:fixture  # fault-lite fixture harness
 bun run ops:probe:bun-exit  # Bun 종료 지연 repro/probe
+bun run ops:probe:canary:distributed  # distributed canary probe
+bun run ops:probe:chaos:distributed  # distributed chaos-lite probe
+bun run ops:verify:rc  # release-candidate deep verification bundle
+bun run ops:readiness:ga  # GA readiness checklist export
+bun run release:ga:check  # GA composed ship gate
 ```
 
 ## 다음 로드맵
 
-- 현재까지의 distributed/service follow-up과 운영 검증 후속은 완료되었다.
-- 다음 작업 기준 문서: `dev-plan/implement_20260412_160606.md`
-- 다음 우선순위:
-  1. production backend/provider contract freeze
-  2. observability / SLI/SLO / alerting hardening
-  3. executor identity / transport auth / secret rotation
-  4. load / soak / chaos / canary automation
-  5. GA readiness / release gate / operator automation
+- 현재까지의 distributed/service follow-up, 운영 검증 후속, 그리고 production operating-model roadmap이 모두 완료되었다.
+- 기준 문서: `dev-plan/implement_20260412_160606.md`
+- 현재 ship gate는 `bun run release:ga:check` 이다.
 
 ## API 보안 규칙
 

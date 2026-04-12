@@ -2,6 +2,11 @@
 
 ## 2026-04-12
 
+### feat(ops): harden provider contracts, readiness, and GA gates (`unreleased`)
+- added provider contract matrix + distributed readiness reporting surfaces for the service-backed distributed control plane
+- added named distributed credential rotation contract, fencing mismatch audit integration, and internal auth test coverage
+- added canary/chaos/release-candidate verification commands plus GA readiness / incident / rollback docs
+
 ### feat(distributed): ship service control plane and ops verification follow-ups (`dc1aa02`)
 - shipped the service-backed distributed control-plane path: internal authenticated coordinator/event/object-store routes, `ServiceControlPlaneCoordinator`, `ServicePollingEventStream`, `ObjectStoreServiceTransport`, and `RemoteExecutorAgent`
 - completed operator follow-up verification with actual real-worker smoke records, weekly deep verification cadence, and Bun exit-delay probe/evidence capture

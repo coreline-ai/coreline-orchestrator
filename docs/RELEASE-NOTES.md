@@ -1,5 +1,25 @@
 # Release Notes
 
+## 2026-04-12 — production operating-model hardening
+
+### Highlights
+- provider contract matrix and distributed readiness/alerting surfaces are now shipped for the service-backed distributed path
+- named distributed credentials with primary-token selection are now supported across coordinator/event/object-store/remote-executor clients
+- release-candidate automation and GA ship/no-ship guidance are now fixed through dedicated commands and operator docs
+
+### Shipped surfaces
+- `GET /api/v1/distributed/providers` and `GET /api/v1/distributed/readiness`
+- distributed named credential contract via `ORCH_DISTRIBUTED_SERVICE_TOKENS` + `ORCH_DISTRIBUTED_SERVICE_TOKEN_ID`
+- canary / chaos / RC verification commands: `ops:probe:canary:distributed`, `ops:probe:chaos:distributed`, `ops:verify:rc`
+- GA docs: `docs/GA-READINESS.md`, `docs/INCIDENT-CHECKLIST.md`, `docs/ROLLBACK-TEMPLATE.md`
+
+### Verification
+- `bun test`
+- `bun run build`
+- `bun run ops:verify:distributed`
+- `bun run ops:verify:rc`
+- `bun run release:ga:check`
+
 ## 2026-04-12 — post-v0.3.0 distributed service follow-up
 
 ### Highlights

@@ -80,7 +80,10 @@ bun run ops:migrate:dry-run
 bun run ops:verify:deep:plan
 bun run ops:probe:soak:fixture
 bun run ops:probe:fault:fixture
+bun run ops:probe:canary:distributed
+bun run ops:probe:chaos:distributed
 bun run ops:verify:deep:weekly
+bun run ops:verify:rc
 ```
 
 검증 범위:
@@ -89,7 +92,7 @@ bun run ops:verify:deep:weekly
 - manual multi-host failover 관측을 위한 별도 matrix 고정
 
 자세한 매트릭스는 [`docs/DEEP-VERIFICATION.md`](./DEEP-VERIFICATION.md)를 따른다.
-정기 실행 bundle은 `bun run ops:verify:deep:weekly`를 사용한다.
+정기 실행 bundle은 `bun run ops:verify:deep:weekly`를 사용한다. release candidate 직전에는 `bun run ops:verify:rc`를 사용한다.
 
 ### 6) Bun exit probe
 
@@ -139,6 +142,19 @@ curl http://127.0.0.1:3100/api/v1/metrics
 - `jobs_failed`
 - `worker_restarts`
 - `avg_job_duration_ms`
+
+### Distributed provider matrix / readiness
+
+```bash
+curl http://127.0.0.1:3100/api/v1/distributed/providers
+curl http://127.0.0.1:3100/api/v1/distributed/readiness
+```
+
+확인 포인트:
+- backend/provider capability matrix
+- degraded-mode fallback 규칙
+- queue depth / stale executor / stale assignment / stuck session alert
+- dispatch lease 부재 여부
 
 ### Worker logs
 
@@ -371,3 +387,15 @@ bun run release:distributed:check
 2. 반드시 `ORCH_API_TOKEN` 설정
 3. path/metadata redaction이 필요한 응답에서 실제로 적용되는지 smoke로 확인
 4. WebSocket query token이 reverse proxy 로그 정책과 충돌하지 않는지 확인
+
+## GA ship gate
+
+```bash
+bun run ops:readiness:ga
+bun run release:ga:check
+```
+
+보조 문서:
+- [`docs/GA-READINESS.md`](./GA-READINESS.md)
+- [`docs/INCIDENT-CHECKLIST.md`](./INCIDENT-CHECKLIST.md)
+- [`docs/ROLLBACK-TEMPLATE.md`](./ROLLBACK-TEMPLATE.md)

@@ -219,6 +219,10 @@ export class WorkerManager {
       ),
       logPath: currentWorker.logPath,
       mode: currentWorker.runtimeMode,
+      maxTurns: parseOptionalPositiveInteger(
+        currentJob.metadata?.runtimeMaxTurns ??
+          currentJob.metadata?.maxTurns,
+      ),
     }
 
     try {
@@ -804,6 +808,8 @@ export class WorkerManager {
     const handle = await this.#runtimeAdapter.reattachSession({
       workerId: worker.workerId,
       sessionId: session.sessionId,
+      repoPath: worker.repoPath,
+      worktreePath: worker.worktreePath,
       attachMode: session.attachMode,
       identity: runtimeIdentity,
       cursor: session.transcriptCursor,
@@ -1602,7 +1608,9 @@ export class WorkerManager {
           handle.sessionTransport.spec.transport,
         transportRootPath:
           attachResult?.identity.transportRootPath ??
-          handle.sessionTransport.spec.rootDir,
+          (handle.sessionTransport.spec.transport === 'file_ndjson'
+            ? handle.sessionTransport.spec.rootDir
+            : undefined),
         runtimeSessionId:
           attachResult?.identity.runtimeSessionId ??
           handle.sessionTransport.spec.runtimeSessionId,
@@ -1839,6 +1847,17 @@ export class WorkerManager {
 
     return candidate
   }
+}
+
+function parseOptionalPositiveInteger(
+  value: string | undefined,
+): number | undefined {
+  if (value === undefined) {
+    return undefined
+  }
+
+  const parsed = Number.parseInt(value, 10)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined
 }
 
 function mapJobResultToJobStatus(status: TerminalExecutionStatus): JobStatus {

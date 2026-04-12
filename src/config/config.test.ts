@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 
 import {
   assertSafeApiConfig,
+  isProductionDeploymentProfile,
   loadConfig,
   resolvePrimaryDistributedServiceCredential,
 } from './config.js'
@@ -12,6 +13,7 @@ describe('config', () => {
 
     expect(config.apiHost).toBe('127.0.0.1')
     expect(config.apiPort).toBe(3100)
+    expect(config.deploymentProfile).toBe('custom')
     expect(config.apiExposure).toBe('trusted_local')
     expect(config.apiAuthToken).toBeUndefined()
     expect(config.distributedServiceUrl).toBeUndefined()
@@ -39,6 +41,7 @@ describe('config', () => {
     const config = loadConfig({
       ORCH_HOST: '0.0.0.0',
       ORCH_PORT: '9999',
+      ORCH_DEPLOYMENT_PROFILE: 'production_service_stack',
       ORCH_API_EXPOSURE: 'untrusted_network',
       ORCH_API_TOKEN: 'secret-token',
       ORCH_DISTRIBUTED_SERVICE_URL: 'http://127.0.0.1:4100',
@@ -73,6 +76,7 @@ describe('config', () => {
 
     expect(config.apiHost).toBe('0.0.0.0')
     expect(config.apiPort).toBe(9999)
+    expect(config.deploymentProfile).toBe('production_service_stack')
     expect(config.apiExposure).toBe('untrusted_network')
     expect(config.apiAuthToken).toBe('secret-token')
     expect(config.distributedServiceUrl).toBe('http://127.0.0.1:4100')
@@ -127,6 +131,7 @@ describe('config', () => {
   test('falls back for invalid numeric or mode values', () => {
     const config = loadConfig({
       ORCH_PORT: '0',
+      ORCH_DEPLOYMENT_PROFILE: 'bogus',
       ORCH_API_EXPOSURE: 'bogus',
       ORCH_CONTROL_BACKEND: 'bogus',
       ORCH_QUEUE_BACKEND: 'bogus',
@@ -140,6 +145,7 @@ describe('config', () => {
     })
 
     expect(config.apiPort).toBe(3100)
+    expect(config.deploymentProfile).toBe('custom')
     expect(config.apiExposure).toBe('trusted_local')
     expect(config.controlPlaneBackend).toBe('memory')
     expect(config.dispatchQueueBackend).toBe('memory')
@@ -224,5 +230,20 @@ describe('config', () => {
       actorType: 'service',
       scopes: ['internal:*'],
     })
+  })
+
+  test('applies production deployment profile defaults while allowing explicit overrides', () => {
+    const config = loadConfig({
+      ORCH_DEPLOYMENT_PROFILE: 'production_service_stack',
+      ORCH_CONTROL_BACKEND: 'sqlite',
+    })
+
+    expect(config.controlPlaneBackend).toBe('sqlite')
+    expect(config.dispatchQueueBackend).toBe('sqlite')
+    expect(config.eventStreamBackend).toBe('service_polling')
+    expect(config.stateStoreBackend).toBe('sqlite')
+    expect(config.artifactTransportMode).toBe('object_store_service')
+    expect(config.workerPlaneBackend).toBe('remote_agent_service')
+    expect(isProductionDeploymentProfile(config)).toBe(true)
   })
 })

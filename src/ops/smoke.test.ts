@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test'
 
 import { JobStatus, WorkerStatus } from '../core/models.js'
 import { stopOrchestrator } from '../index.js'
-import { runSmokeScenario } from './smoke.js'
+import { getSmokePrompt, getSmokeSystemAppend, runSmokeScenario } from './smoke.js'
 
 const fixtureSuccessWorkerPath = new URL(
   '../../scripts/fixtures/smoke-success-worker.sh',
@@ -161,4 +161,15 @@ describe('ops smoke', () => {
     },
     45_000,
   )
+
+  test('real session prompt uses stdio session transport directly', () => {
+    const prompt = getSmokePrompt('success', 'real', 'session')
+    const append = getSmokeSystemAppend('success', 'real', 'session')
+
+    expect(prompt).toContain('stdio session transport directly')
+    expect(prompt).not.toContain('real-session-worker.ts')
+    expect(append).toContain('stdio session transport directly')
+    expect(append).not.toContain('helper scripts')
+    expect(append).not.toContain('real-session-worker.ts')
+  })
 })

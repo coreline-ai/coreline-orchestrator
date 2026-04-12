@@ -52,6 +52,7 @@ function createConfig(
   overrides: Partial<OrchestratorConfig> = {},
 ): OrchestratorConfig {
   return {
+    deploymentProfile: 'custom',
     apiHost: '127.0.0.1',
     apiPort: 0,
     apiExposure: 'trusted_local',
@@ -518,6 +519,7 @@ describe('api server', () => {
     const healthResponse = await app.request('/api/v1/health')
     const capacityResponse = await app.request('/api/v1/capacity')
     const metricsResponse = await app.request('/api/v1/metrics')
+    const prometheusResponse = await app.request('/api/v1/metrics/prometheus')
 
     expect(healthResponse.status).toBe(200)
     expect(
@@ -545,6 +547,15 @@ describe('api server', () => {
     }
     expect(metrics.jobs_total).toBe(2)
     expect(metrics.jobs_failed).toBe(1)
+
+    expect(prometheusResponse.status).toBe(200)
+    expect(prometheusResponse.headers.get('content-type')).toContain(
+      'text/plain',
+    )
+    const prometheus = await prometheusResponse.text()
+    expect(prometheus).toContain('coreline_orchestrator_jobs_total 2')
+    expect(prometheus).toContain('coreline_orchestrator_jobs_failed 1')
+    expect(prometheus).toContain('coreline_orchestrator_queue_depth 1')
   })
 
   test('external exposure redacts sensitive paths and metadata in job, worker, and artifact responses', async () => {

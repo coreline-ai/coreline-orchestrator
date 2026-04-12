@@ -5,6 +5,7 @@ export type ApiExposureMode = 'trusted_local' | 'untrusted_network'
 export type StateStoreBackend = 'file' | 'sqlite'
 export type ApiPrincipalActorType = 'operator' | 'service'
 export type DistributedServicePrincipalActorType = 'service' | 'executor'
+export type DeploymentProfile = 'custom' | 'production_service_stack'
 export type ControlPlaneBackend = 'memory' | 'sqlite' | 'service'
 export type DispatchQueueBackend = 'memory' | 'sqlite'
 export type EventStreamBackend =
@@ -39,6 +40,7 @@ export interface DistributedServiceAuthTokenConfig {
 }
 
 export interface OrchestratorConfig {
+  deploymentProfile: DeploymentProfile
   apiHost: string
   apiPort: number
   apiExposure: ApiExposureMode
@@ -72,6 +74,7 @@ export interface OrchestratorConfig {
 }
 
 const defaultConfig: OrchestratorConfig = {
+  deploymentProfile: 'custom',
   apiHost: '127.0.0.1',
   apiPort: 3100,
   apiExposure: 'trusted_local',
@@ -98,7 +101,14 @@ const defaultConfig: OrchestratorConfig = {
 export function loadConfig(
   env: Record<string, string | undefined> = process.env,
 ): OrchestratorConfig {
+  const deploymentProfile = parseDeploymentProfile(
+    env.ORCH_DEPLOYMENT_PROFILE,
+    defaultConfig.deploymentProfile,
+  )
+  const profileDefaults = resolveProfileDefaults(deploymentProfile)
+
   return {
+    deploymentProfile,
     apiHost: env.ORCH_HOST ?? defaultConfig.apiHost,
     apiPort: parsePositiveInteger(env.ORCH_PORT, defaultConfig.apiPort),
     apiExposure: parseApiExposureMode(
@@ -121,21 +131,21 @@ export function loadConfig(
     ),
     controlPlaneBackend: parseControlPlaneBackend(
       env.ORCH_CONTROL_BACKEND,
-      defaultConfig.controlPlaneBackend,
+      profileDefaults.controlPlaneBackend ?? defaultConfig.controlPlaneBackend,
     ),
     controlPlaneSqlitePath: normalizeOptionalString(env.ORCH_CONTROL_SQLITE_PATH),
     dispatchQueueBackend: parseDispatchQueueBackend(
       env.ORCH_QUEUE_BACKEND,
-      defaultConfig.dispatchQueueBackend,
+      profileDefaults.dispatchQueueBackend ?? defaultConfig.dispatchQueueBackend,
     ),
     dispatchQueueSqlitePath: normalizeOptionalString(env.ORCH_QUEUE_SQLITE_PATH),
     eventStreamBackend: parseEventStreamBackend(
       env.ORCH_EVENT_STREAM_BACKEND,
-      defaultConfig.eventStreamBackend,
+      profileDefaults.eventStreamBackend ?? defaultConfig.eventStreamBackend,
     ),
     stateStoreBackend: parseStateStoreBackend(
       env.ORCH_STATE_BACKEND,
-      defaultConfig.stateStoreBackend,
+      profileDefaults.stateStoreBackend ?? defaultConfig.stateStoreBackend,
     ),
     stateStoreImportFromFile: parseBoolean(
       env.ORCH_STATE_IMPORT_FROM_FILE,
@@ -144,11 +154,12 @@ export function loadConfig(
     stateStoreSqlitePath: normalizeOptionalString(env.ORCH_STATE_SQLITE_PATH),
     artifactTransportMode: parseArtifactTransportMode(
       env.ORCH_ARTIFACT_TRANSPORT,
-      defaultConfig.artifactTransportMode,
+      profileDefaults.artifactTransportMode ??
+        defaultConfig.artifactTransportMode,
     ),
     workerPlaneBackend: parseWorkerPlaneBackend(
       env.ORCH_WORKER_PLANE_BACKEND,
-      defaultConfig.workerPlaneBackend,
+      profileDefaults.workerPlaneBackend ?? defaultConfig.workerPlaneBackend,
     ),
     maxActiveWorkers: parsePositiveInteger(
       env.ORCH_MAX_WORKERS,
@@ -183,6 +194,12 @@ export function loadConfig(
       env.ORCH_ALERT_MAX_STUCK_SESSIONS,
     ),
   }
+}
+
+export function isProductionDeploymentProfile(
+  config: Pick<OrchestratorConfig, 'deploymentProfile'>,
+): boolean {
+  return config.deploymentProfile === 'production_service_stack'
 }
 
 export function assertSafeApiConfig(config: OrchestratorConfig): void {
@@ -290,6 +307,47 @@ function parseApiExposureMode(
   }
 
   return fallback
+}
+
+function parseDeploymentProfile(
+  rawValue: string | undefined,
+  fallback: DeploymentProfile,
+): DeploymentProfile {
+  if (
+    rawValue === 'custom' ||
+    rawValue === 'production_service_stack'
+  ) {
+    return rawValue
+  }
+
+  return fallback
+}
+
+function resolveProfileDefaults(
+  profile: DeploymentProfile,
+): Partial<
+  Pick<
+    OrchestratorConfig,
+    | 'controlPlaneBackend'
+    | 'dispatchQueueBackend'
+    | 'eventStreamBackend'
+    | 'stateStoreBackend'
+    | 'artifactTransportMode'
+    | 'workerPlaneBackend'
+  >
+> {
+  if (profile === 'production_service_stack') {
+    return {
+      controlPlaneBackend: 'service',
+      dispatchQueueBackend: 'sqlite',
+      eventStreamBackend: 'service_polling',
+      stateStoreBackend: 'sqlite',
+      artifactTransportMode: 'object_store_service',
+      workerPlaneBackend: 'remote_agent_service',
+    }
+  }
+
+  return {}
 }
 
 function parseApiAuthTokens(

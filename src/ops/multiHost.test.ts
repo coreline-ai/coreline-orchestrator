@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 
 import { JobStatus } from '../core/models.js'
 import {
+  runDistributedWorkerPlaneDaemonPrototype,
   runDistributedWorkerPlanePrototype,
   runMultiHostPrototype,
 } from './multiHost.js'
@@ -54,6 +55,18 @@ describe('multi-host prototype', () => {
     expect(result.result_transport).toBe('object_store_service')
     expect(result.remote_failover_observed).toBe(true)
     expect(result.registered_executors).toContain('ctrl_main')
+    expect(result.registered_executors).toContain('remote_beta')
+  })
+
+  test('runs the distributed worker-plane through daemonized remote executors', async () => {
+    const result = await runDistributedWorkerPlaneDaemonPrototype({
+      workerBinary: './scripts/fixtures/smoke-success-worker.sh',
+    })
+
+    expect(result.first_job.job_status).toBe(JobStatus.Completed)
+    expect(result.second_job.job_status).toBe(JobStatus.Completed)
+    expect(result.daemonized).toBe(true)
+    expect(result.remote_failover_observed).toBe(true)
     expect(result.registered_executors).toContain('remote_beta')
   })
 })

@@ -47,6 +47,7 @@ async function createHarness(options: {
   const repoPath = await mkdtemp(join(tmpdir(), 'coreline-orch-distributed-api-'))
   tempDirs.push(repoPath)
   const config: OrchestratorConfig = {
+    deploymentProfile: 'custom',
     apiHost: '127.0.0.1',
     apiPort: 0,
     apiExposure: 'trusted_local',

@@ -188,6 +188,7 @@ async function probeBackend(
   workerBinary: string,
 ): Promise<MigrationBackendProbe> {
   const config: OrchestratorConfig = {
+    deploymentProfile: 'custom',
     apiHost: '127.0.0.1',
     apiPort: 0,
     apiExposure: 'trusted_local',

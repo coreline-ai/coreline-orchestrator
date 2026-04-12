@@ -45,7 +45,10 @@ bun run ops:smoke:session:reattach:fixture
 ```bash
 bun run ops:smoke:real:preflight
 bun run ops:smoke:real
+bun run ops:smoke:real:session
 ```
+
+`ops:smoke:real:session`은 stdio session transport를 통해 attach / input / ack / reattach / resume까지 실제 `codexcode`로 검증한다.
 
 권장 사전 조건:
 - `codexcode`가 PATH에 존재
@@ -56,6 +59,22 @@ bun run ops:smoke:real
 
 자세한 절차는 [`docs/REAL-SMOKE-RUNBOOK.md`](./REAL-SMOKE-RUNBOOK.md)를 따른다.
 Actual operator record: [`docs/REAL-SMOKE-REPORT-20260412.md`](./REAL-SMOKE-REPORT-20260412.md).
+
+### 3.5) Real task execution proof
+
+실제 `codexcode`가 임시 repo를 수정하고 `bun test`를 통과시키는지 검증한다.
+
+```bash
+bun run ops:proof:real-task
+bun run ops:proof:real-task:distributed
+```
+
+검증 범위:
+- local orchestrator path
+- remote executor distributed path
+- 실제 repo 파일 수정
+- 실제 `bun test` 통과
+- structured worker result 집계
 
 ### 4) SQLite migration dry-run
 

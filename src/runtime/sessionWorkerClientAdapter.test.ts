@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
 import { SessionWorkerClientAdapter, createSessionTransportSpec } from './sessionWorkerClientAdapter.js'
-import type { WorkerRuntimeSpec } from './types.js'
+import type { FileRuntimeSessionTransportSpec, WorkerRuntimeSpec } from './types.js'
 
 function createSpec(rootDir: string): WorkerRuntimeSpec {
   return {
@@ -27,6 +27,7 @@ describe('sessionWorkerClientAdapter', () => {
     try {
       const adapter = new SessionWorkerClientAdapter()
       const state = await adapter.prepareTransport(createSpec(rootDir), '.orchestrator')
+      const fileSpec = state.spec as FileRuntimeSessionTransportSpec
 
       expect(state.spec.transport).toBe('file_ndjson')
 
@@ -36,15 +37,15 @@ describe('sessionWorkerClientAdapter', () => {
         { sessionId: 'sess_runtime_01', mode: 'interactive' },
       )
 
-      expect(identity.identity.transportRootPath).toBe(state.spec.rootDir)
-      expect(identity.identity.runtimeSessionId).toBe(state.spec.runtimeSessionId)
+      expect(identity.identity.transportRootPath).toBe(fileSpec.rootDir)
+      expect(identity.identity.runtimeSessionId).toBe(fileSpec.runtimeSessionId)
 
       const identityFile = JSON.parse(
-        await readFile(state.spec.identityPath, 'utf8'),
+        await readFile(fileSpec.identityPath, 'utf8'),
       ) as { sessionId: string; transportRootPath: string }
       expect(identityFile).toMatchObject({
         sessionId: 'sess_runtime_01',
-        transportRootPath: state.spec.rootDir,
+        transportRootPath: fileSpec.rootDir,
       })
 
       const reattached = await adapter.reattachTransport({
@@ -55,15 +56,17 @@ describe('sessionWorkerClientAdapter', () => {
           sessionId: 'sess_runtime_01',
           pid: 4242,
           transport: 'file_ndjson',
-          transportRootPath: state.spec.rootDir,
-          runtimeSessionId: state.spec.runtimeSessionId,
-          runtimeInstanceId: state.spec.runtimeInstanceId,
-          reattachToken: state.spec.reattachToken,
+          transportRootPath: fileSpec.rootDir,
+          runtimeSessionId: fileSpec.runtimeSessionId,
+          runtimeInstanceId: fileSpec.runtimeInstanceId,
+          reattachToken: fileSpec.reattachToken,
         },
+        repoPath: rootDir,
       })
 
-      expect(reattached.spec.rootDir).toBe(state.spec.rootDir)
-      expect(reattached.spec.runtimeInstanceId).toBe(state.spec.runtimeInstanceId)
+      const reattachedSpec = reattached.spec as FileRuntimeSessionTransportSpec
+      expect(reattachedSpec.rootDir).toBe(fileSpec.rootDir)
+      expect(reattachedSpec.runtimeInstanceId).toBe(fileSpec.runtimeInstanceId)
       expect(reattached.attachedSessionId).toBe('sess_runtime_01')
     } finally {
       await rm(rootDir, { recursive: true, force: true })

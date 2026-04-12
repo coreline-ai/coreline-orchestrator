@@ -1,4 +1,5 @@
 import {
+  runDistributedWorkerPlaneDaemonPrototype,
   runDistributedWorkerPlanePrototype,
   runMultiHostPrototype,
 } from '../src/ops/multiHost.js'
@@ -8,6 +9,11 @@ async function main(): Promise<void> {
   const result =
     args.mode === 'service'
       ? await runDistributedWorkerPlanePrototype({
+          workerBinary: args.workerBinary,
+          keepTemp: args.keepTemp,
+        })
+      : args.mode === 'daemon'
+      ? await runDistributedWorkerPlaneDaemonPrototype({
           workerBinary: args.workerBinary,
           keepTemp: args.keepTemp,
         })
@@ -22,11 +28,11 @@ async function main(): Promise<void> {
 function parseArgs(argv: string[]): {
   workerBinary: string
   keepTemp: boolean
-  mode: 'prototype' | 'service'
+  mode: 'prototype' | 'service' | 'daemon'
 } {
   let workerBinary = ''
   let keepTemp = false
-  let mode: 'prototype' | 'service' = 'prototype'
+  let mode: 'prototype' | 'service' | 'daemon' = 'prototype'
 
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index]
@@ -43,7 +49,7 @@ function parseArgs(argv: string[]): {
 
     if (argument === '--mode') {
       const value = argv[index + 1]
-      if (value === 'prototype' || value === 'service') {
+      if (value === 'prototype' || value === 'service' || value === 'daemon') {
         mode = value
       }
       index += 1

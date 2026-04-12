@@ -1,5 +1,6 @@
 import type { ChildProcessByStdio } from 'node:child_process'
 import type { Readable } from 'node:stream'
+import type { Writable } from 'node:stream'
 
 import type {
   ExecutionMode,
@@ -52,7 +53,7 @@ export interface WorkerInvocation {
   env: Record<string, string>
 }
 
-export type RuntimeProcess = ChildProcessByStdio<null, Readable, Readable>
+export type RuntimeProcess = ChildProcessByStdio<Writable | null, Readable, Readable>
 
 export interface RuntimeExitResult {
   exitCode: number | null
@@ -157,7 +158,7 @@ export interface RuntimeSessionAttachResult {
   backpressure?: SessionBackpressureState
 }
 
-export interface RuntimeSessionTransportSpec {
+export interface FileRuntimeSessionTransportSpec {
   transport: 'file_ndjson'
   rootDir: string
   controlPath: string
@@ -168,6 +169,17 @@ export interface RuntimeSessionTransportSpec {
   runtimeInstanceId: string
   reattachToken: string
 }
+
+export interface StdioRuntimeSessionTransportSpec {
+  transport: 'stdio'
+  runtimeSessionId?: string
+  runtimeInstanceId: string
+  reattachToken: string
+}
+
+export type RuntimeSessionTransportSpec =
+  | FileRuntimeSessionTransportSpec
+  | StdioRuntimeSessionTransportSpec
 
 export interface RuntimeSessionTransportState {
   spec: RuntimeSessionTransportSpec
@@ -180,6 +192,8 @@ export interface RuntimeSessionTransportState {
 export interface RuntimeSessionReattachRequest {
   workerId: string
   sessionId: string
+  repoPath: string
+  worktreePath?: string
   attachMode?: SessionAttachMode
   identity: PersistedRuntimeIdentity
   cursor?: SessionTranscriptCursor

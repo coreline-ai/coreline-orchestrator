@@ -165,6 +165,32 @@ curl -N http://localhost:3100/api/v1/jobs/<job_id>/events
 curl http://localhost:3100/api/v1/jobs/<job_id>/results
 ```
 
+### CLI Quickstart
+
+`dist/cli.js`는 서버 실행, API proxy, real smoke, real proof를 모두 직접 다룹니다.
+
+```bash
+# Help
+bun dist/cli.js --help
+
+# Start a local server
+bun dist/cli.js serve --host 127.0.0.1 --port 4310
+
+# Submit and inspect jobs through the CLI
+bun dist/cli.js jobs create --base-url http://127.0.0.1:4310/api/v1 --repo-path /repo --title "Fix bug" --prompt "Investigate and fix"
+bun dist/cli.js jobs list --base-url http://127.0.0.1:4310/api/v1
+bun dist/cli.js workers list --base-url http://127.0.0.1:4310/api/v1
+
+# Real codex session proof
+bun dist/cli.js smoke real --worker-binary codexcode --execution-mode session --verify-session-flow --verify-session-reattach
+
+# Real task proofs
+bun dist/cli.js proof real-task --worker-binary codexcode
+bun dist/cli.js proof real-task distributed --worker-binary codexcode
+```
+
+이 경로들은 fixture가 아니라 실제 `codexcode`를 worker로 띄우는 검증 경로다.
+
 ### Configuration
 
 | Environment Variable | Default | Description |
@@ -662,6 +688,7 @@ bun run ops:smoke:fixture  # CI-safe success smoke with fixture worker
 bun run ops:smoke:timeout:fixture  # CI-safe timeout smoke with fixture worker
 bun run ops:smoke:real:preflight  # Manual real-worker smoke preflight
 bun run ops:smoke:real  # Manual real-worker smoke using codexcode
+bun run ops:smoke:real:session  # Real codex session attach/reattach proof
 bun run ops:smoke:v2:session:fixture  # Session + SQLite + WebSocket fixture smoke
 bun run ops:smoke:session:reattach:fixture  # Same-session reconnect/resume smoke
 bun run ops:migrate:dry-run  # File→SQLite dry-run and rollback rehearsal
@@ -678,6 +705,8 @@ bun run ops:probe:bun-exit  # Bun exit-delay repro/probe helper
 bun run ops:probe:bun-exit:migration  # Migration path exit-delay probe
 bun run ops:verify:deep:weekly  # Post-ship weekly deep verification bundle
 bun run ops:verify:rc  # Release-candidate deep verification bundle
+bun run ops:proof:real-task  # Real codex local task proof (actual repo edit + bun test)
+bun run ops:proof:real-task:distributed  # Real codex distributed task proof via remote executor
 bun run ops:readiness:ga  # GA ship/no-ship checklist export
 bun run release:v2:check  # Full release gate plus v2 ops verification
 bun run release:distributed:check  # v2 gate + distributed prototype/service verification

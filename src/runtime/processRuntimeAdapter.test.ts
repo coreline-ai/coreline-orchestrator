@@ -37,6 +37,7 @@ async function createExecutableScript(
 
 function createConfig(workerBinary: string): OrchestratorConfig {
   return {
+    deploymentProfile: 'custom',
     apiHost: '127.0.0.1',
     apiPort: 3100,
     apiExposure: 'trusted_local',
@@ -354,6 +355,7 @@ describe('processRuntimeAdapter', () => {
     const reattachedHandle = await adapter.reattachSession!({
       workerId: 'wrk_runtime',
       sessionId: 'sess_runtime_reattach',
+      repoPath: directoryPath,
       identity: {
         ...attachResult.identity,
         pid: handle.pid,

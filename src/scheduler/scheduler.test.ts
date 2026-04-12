@@ -37,6 +37,7 @@ async function createTempDir(prefix: string): Promise<string> {
 
 function createConfig(allowedRepoRoots: string[]): OrchestratorConfig {
   return {
+    deploymentProfile: 'custom',
     apiHost: '127.0.0.1',
     apiPort: 3100,
     apiExposure: 'trusted_local',

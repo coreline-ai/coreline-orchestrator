@@ -5,6 +5,7 @@ import { buildInvocation } from './invocationBuilder.js'
 import type { WorkerRuntimeSpec } from './types.js'
 
 const config: OrchestratorConfig = {
+  deploymentProfile: 'custom',
   apiHost: '127.0.0.1',
   apiPort: 3100,
   apiExposure: 'trusted_local',

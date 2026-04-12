@@ -12,9 +12,31 @@ export function buildInvocation(
     '--verbose',
     '--bare',
     '--dangerously-skip-permissions',
+  ]
+
+  if (spec.sessionTransport?.transport === 'stdio') {
+    args.push(
+      '--input-format',
+      'stream-json',
+      '--replay-user-messages',
+      '--output-format',
+      'stream-json',
+      '--max-turns',
+      String(spec.maxTurns ?? DEFAULT_MAX_TURNS),
+    )
+
+    return {
+      command: config.workerBinary,
+      args,
+      cwd: spec.worktreePath ?? spec.repoPath,
+      env: buildInvocationEnv(spec),
+    }
+  }
+
+  args.push(
     '--output-format',
     'stream-json',
-  ]
+  )
 
   if (spec.mode !== 'session') {
     args.push('--no-session-persistence')
@@ -49,7 +71,10 @@ function buildInvocationEnv(
     ORCH_JOB_ID: spec.jobId,
     ORCH_WORKER_ID: spec.workerId,
     ORCH_WORKER_INDEX: String(spec.workerIndex),
-    ...(spec.sessionTransport === undefined
+    ORCH_REPO_PATH: spec.repoPath,
+    ORCH_WORKTREE_PATH: spec.worktreePath ?? '',
+    ORCH_ORCHESTRATOR_ROOT: '.orchestrator',
+    ...(spec.sessionTransport?.transport !== 'file_ndjson'
       ? {}
       : {
           ORCH_SESSION_TRANSPORT: spec.sessionTransport.transport,

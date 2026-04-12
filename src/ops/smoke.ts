@@ -238,6 +238,7 @@ export async function runSmokeScenario(
   )
 
   const config: OrchestratorConfig = {
+    deploymentProfile: 'custom',
     apiHost: '127.0.0.1',
     apiPort: 0,
     apiExposure: options.apiExposure ?? (verifySessionFlow ? 'untrusted_network' : 'trusted_local'),
@@ -873,7 +874,7 @@ function getSmokeJobTitle(
     : `${prefix} success scenario`
 }
 
-function getSmokePrompt(
+export function getSmokePrompt(
   scenario: RunSmokeScenarioOptions['scenario'],
   workerModeLabel: 'fixture' | 'real',
   executionMode: ExecutionMode,
@@ -886,6 +887,18 @@ function getSmokePrompt(
 
   if (executionMode !== 'process' && workerModeLabel === 'fixture') {
     return 'fixture session smoke'
+  }
+
+  if (workerModeLabel === 'real' && executionMode === 'session') {
+    return [
+      'This is a Coreline Orchestrator real Codex session integration test.',
+      'Do not modify repository files.',
+      'Use the existing stdio session transport directly.',
+      'Do not run any helper script or subprocess.',
+      'Acknowledge the session attach and respond to interactive input with literal echoes.',
+      'When asked to process input, reply with exactly "echo:<input>".',
+      'Keep the session attached until the orchestrator cancels it.',
+    ].join('\n')
   }
 
   if (workerModeLabel === 'real') {
@@ -909,13 +922,17 @@ function getSmokePrompt(
   return 'fixture success smoke'
 }
 
-function getSmokeSystemAppend(
+export function getSmokeSystemAppend(
   scenario: RunSmokeScenarioOptions['scenario'],
   workerModeLabel: 'fixture' | 'real',
   executionMode: ExecutionMode,
 ): string {
   if (executionMode !== 'process' && workerModeLabel === 'fixture') {
     return 'Stay alive until explicitly canceled by the orchestrator. Write ORCH_RESULT_PATH when SIGTERM arrives, then exit successfully.'
+  }
+
+  if (workerModeLabel === 'real' && executionMode === 'session' && scenario === 'success') {
+    return 'Use the stdio session transport directly. Echo interactive input back to the orchestrator, remain attached until canceled, and do not launch subprocesses.'
   }
 
   if (workerModeLabel === 'real' && scenario === 'success') {

@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process'
 import { PassThrough } from 'node:stream'
 import { EventEmitter } from 'node:events'
+import { basename } from 'node:path'
 
 import type { OrchestratorConfig } from '../config/config.js'
 import {
@@ -9,6 +10,7 @@ import {
   WorkerSpawnFailedError,
 } from '../core/errors.js'
 import { buildInvocation } from './invocationBuilder.js'
+import { CodexStdioSessionClient } from './codexStdioSessionClient.js'
 import { SessionWorkerClientAdapter } from './sessionWorkerClientAdapter.js'
 import type {
   RuntimeAdapter,
@@ -41,6 +43,7 @@ export class ProcessRuntimeAdapter implements RuntimeAdapter {
     config: OrchestratorConfig,
   ) => WorkerInvocation
   readonly #sessionClientAdapter: SessionWorkerClientAdapter
+  readonly #codexSessionClient: CodexStdioSessionClient
 
   constructor(
     config: OrchestratorConfig,
@@ -51,11 +54,16 @@ export class ProcessRuntimeAdapter implements RuntimeAdapter {
     this.#invocationBuilder = options.invocationBuilder ?? buildInvocation
     this.#sessionClientAdapter =
       options.sessionClientAdapter ?? new SessionWorkerClientAdapter()
+    this.#codexSessionClient = new CodexStdioSessionClient()
   }
 
   async start(spec: WorkerRuntimeSpec): Promise<RuntimeHandle> {
+    const useCodexSessionTransport =
+      spec.mode === 'session' && isCodexWorkerBinary(this.#config.workerBinary)
     const sessionTransport =
-      spec.mode === 'session'
+      useCodexSessionTransport
+        ? this.#codexSessionClient.createTransportState()
+        : spec.mode === 'session'
         ? await this.#sessionClientAdapter.prepareTransport(
             spec,
             this.#config.orchestratorRootDir,
@@ -72,7 +80,7 @@ export class ProcessRuntimeAdapter implements RuntimeAdapter {
       const child = spawn(invocation.command, invocation.args, {
         cwd: invocation.cwd,
         env: invocation.env,
-        stdio: ['ignore', 'pipe', 'pipe'],
+        stdio: ['pipe', 'pipe', 'pipe'],
       })
 
       let timeoutId: ReturnType<typeof setTimeout> | undefined
@@ -105,6 +113,15 @@ export class ProcessRuntimeAdapter implements RuntimeAdapter {
           exit,
           timedOut: false,
           ...(sessionTransport === undefined ? {} : { sessionTransport }),
+        }
+
+        if (sessionTransport?.spec.transport === 'stdio') {
+          this.#codexSessionClient.bindHandle(handle, sessionTransport)
+          void this.#codexSessionClient.sendInitialPrompt(
+            handle,
+            sessionTransport,
+            spec.prompt,
+          )
         }
 
         timeoutId = setTimeout(() => {
@@ -182,6 +199,17 @@ export class ProcessRuntimeAdapter implements RuntimeAdapter {
       )
     }
 
+    if (handle.sessionTransport.spec.transport === 'stdio') {
+      return await this.#codexSessionClient.attachSession(
+        handle.sessionTransport,
+        {
+          pid: handle.pid,
+          startedAt: handle.startedAt,
+        },
+        request,
+      )
+    }
+
     return await this.#sessionClientAdapter.attachSession(
       handle.sessionTransport,
       {
@@ -204,6 +232,11 @@ export class ProcessRuntimeAdapter implements RuntimeAdapter {
       )
     }
 
+    if (handle.sessionTransport.spec.transport === 'stdio') {
+      await this.#codexSessionClient.detachSession(handle.sessionTransport, request)
+      return
+    }
+
     await this.#sessionClientAdapter.detachSession(handle.sessionTransport, request)
   }
 
@@ -216,6 +249,14 @@ export class ProcessRuntimeAdapter implements RuntimeAdapter {
         input.sessionId,
         'send_input',
         'runtime_handle_has_no_session_transport',
+      )
+    }
+
+    if (handle.sessionTransport.spec.transport === 'stdio') {
+      return await this.#codexSessionClient.sendInput(
+        handle,
+        handle.sessionTransport,
+        input,
       )
     }
 
@@ -238,6 +279,10 @@ export class ProcessRuntimeAdapter implements RuntimeAdapter {
       )
     }
 
+    if (handle.sessionTransport.spec.transport === 'stdio') {
+      return await this.#codexSessionClient.readOutput(handle.sessionTransport, options)
+    }
+
     return await this.#sessionClientAdapter.readOutput(handle.sessionTransport, options)
   }
 
@@ -249,6 +294,67 @@ export class ProcessRuntimeAdapter implements RuntimeAdapter {
         request.sessionId,
         'identity_is_not_session_mode',
       )
+    }
+
+    if (request.identity.transport === 'stdio') {
+      const runtimeSessionId =
+        request.identity.runtimeSessionId ?? request.identity.sessionId
+      if (runtimeSessionId === undefined) {
+        throw new SessionReattachFailedError(
+          request.sessionId,
+          'missing_codex_runtime_session_id',
+        )
+      }
+
+      const invocation = buildCodexSessionResumeInvocation(
+        this.#config.workerBinary,
+        runtimeSessionId,
+        request.worktreePath ?? request.repoPath,
+      )
+
+      const child = spawn(invocation.command, invocation.args, {
+        cwd: invocation.cwd,
+        env: invocation.env,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      })
+
+      const exit = new Promise<{ exitCode: number | null; signal: NodeJS.Signals | null }>(
+        (resolveExit) => {
+          child.once('close', (exitCode, signal) => {
+            resolveExit({
+              exitCode,
+              signal,
+            })
+          })
+        },
+      )
+
+      await new Promise<void>((resolve, reject) => {
+        child.once('error', reject)
+        child.once('spawn', () => resolve())
+      })
+
+      const sessionTransport = this.#codexSessionClient.createTransportState({
+        runtimeSessionId,
+        runtimeInstanceId: request.identity.runtimeInstanceId,
+        reattachToken: request.identity.reattachToken,
+        transcriptCursor:
+          request.cursor ?? request.identity.transcriptCursor,
+        backpressure: request.identity.backpressure,
+      })
+
+      const handle: RuntimeHandle = {
+        workerId: request.workerId,
+        pid: child.pid ?? undefined,
+        startedAt: request.identity.startedAt ?? new Date().toISOString(),
+        process: child,
+        exit,
+        timedOut: false,
+        sessionTransport,
+      }
+
+      this.#codexSessionClient.bindHandle(handle, sessionTransport)
+      return handle
     }
 
     if (request.identity.pid === undefined) {
@@ -271,6 +377,42 @@ export class ProcessRuntimeAdapter implements RuntimeAdapter {
       sessionTransport,
     }
   }
+}
+
+function buildCodexSessionResumeInvocation(
+  workerBinary: string,
+  runtimeSessionId: string,
+  cwd: string,
+): WorkerInvocation {
+  return {
+    command: workerBinary,
+    args: [
+      '--resume',
+      runtimeSessionId,
+      '--print',
+      '--verbose',
+      '--bare',
+      '--dangerously-skip-permissions',
+      '--input-format',
+      'stream-json',
+      '--replay-user-messages',
+      '--output-format',
+      'stream-json',
+      '--max-turns',
+      '32',
+    ],
+    cwd,
+    env: Object.fromEntries(
+      Object.entries(process.env).filter(
+        (entry): entry is [string, string] => entry[1] !== undefined,
+      ),
+    ),
+  }
+}
+
+function isCodexWorkerBinary(workerBinary: string): boolean {
+  const name = basename(workerBinary).toLowerCase()
+  return name === 'codexcode' || name.startsWith('codexcode.')
 }
 
 function delay(milliseconds: number): Promise<void> {

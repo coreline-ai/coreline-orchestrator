@@ -11,6 +11,7 @@ import {
   buildRemoteJobClaimEnvelope,
   type SchedulerStrategy,
 } from '../control/remotePlane.js'
+import { RemoteExecutorDaemon } from '../control/executorDaemon.js'
 import { RemoteExecutorAgent } from '../control/remoteExecutorAgent.js'
 import type { OrchestratorConfig } from '../config/config.js'
 import { JobStatus, type WorkerStatus } from '../core/models.js'
@@ -73,6 +74,7 @@ export interface DistributedWorkerPlaneResult {
   artifact_transport: string
   result_transport: string
   remote_failover_observed: boolean
+  daemonized?: boolean
 }
 
 export async function runMultiHostPrototype(
@@ -86,6 +88,7 @@ export async function runMultiHostPrototype(
   await writeFile(join(repoPath, 'README.md'), '# multihost prototype repo\n', 'utf8')
 
   const config: OrchestratorConfig = {
+    deploymentProfile: 'custom',
     apiHost: '127.0.0.1',
     apiPort: 0,
     apiExposure: 'trusted_local',
@@ -240,6 +243,19 @@ export async function runMultiHostPrototype(
 export async function runDistributedWorkerPlanePrototype(
   options: RunMultiHostPrototypeOptions,
 ): Promise<DistributedWorkerPlaneResult> {
+  return await runDistributedWorkerPlanePrototypeInternal(options, false)
+}
+
+export async function runDistributedWorkerPlaneDaemonPrototype(
+  options: RunMultiHostPrototypeOptions,
+): Promise<DistributedWorkerPlaneResult> {
+  return await runDistributedWorkerPlanePrototypeInternal(options, true)
+}
+
+async function runDistributedWorkerPlanePrototypeInternal(
+  options: RunMultiHostPrototypeOptions,
+  daemonized: boolean,
+): Promise<DistributedWorkerPlaneResult> {
   const rootDir = await mkdtemp(join(tmpdir(), 'coreline-orch-distributed-'))
   const repoPath = join(rootDir, 'repo')
   const stateRootDir = join(rootDir, '.orchestrator-state')
@@ -254,6 +270,7 @@ export async function runDistributedWorkerPlanePrototype(
   )
 
   const config: OrchestratorConfig = {
+    deploymentProfile: 'production_service_stack',
     apiHost: '127.0.0.1',
     apiPort,
     apiExposure: 'trusted_local',
@@ -288,20 +305,42 @@ export async function runDistributedWorkerPlanePrototype(
     hostId: 'control-host',
     version: '0.4.0-distributed-prototype',
   })
-  const alpha = new RemoteExecutorAgent({
-    serviceUrl: config.distributedServiceUrl!,
-    serviceToken: config.distributedServiceToken!,
-    executorId: 'remote_alpha',
-    hostId: 'remote-host-alpha',
-    workerBinary,
-  })
-  const beta = new RemoteExecutorAgent({
-    serviceUrl: config.distributedServiceUrl!,
-    serviceToken: config.distributedServiceToken!,
-    executorId: 'remote_beta',
-    hostId: 'remote-host-beta',
-    workerBinary,
-  })
+  const alpha = daemonized
+    ? new RemoteExecutorDaemon({
+        serviceUrl: config.distributedServiceUrl!,
+        serviceToken: config.distributedServiceToken!,
+        executorId: 'remote_alpha',
+        hostId: 'remote-host-alpha',
+        workerBinary,
+        executorVersion: '0.4.0-daemon',
+        executorLabels: ['daemon', 'alpha'],
+        expectedControlPlaneVersionPrefix: '0.4.0',
+      })
+    : new RemoteExecutorAgent({
+        serviceUrl: config.distributedServiceUrl!,
+        serviceToken: config.distributedServiceToken!,
+        executorId: 'remote_alpha',
+        hostId: 'remote-host-alpha',
+        workerBinary,
+      })
+  const beta = daemonized
+    ? new RemoteExecutorDaemon({
+        serviceUrl: config.distributedServiceUrl!,
+        serviceToken: config.distributedServiceToken!,
+        executorId: 'remote_beta',
+        hostId: 'remote-host-beta',
+        workerBinary,
+        executorVersion: '0.4.0-daemon',
+        executorLabels: ['daemon', 'beta'],
+        expectedControlPlaneVersionPrefix: '0.4.0',
+      })
+    : new RemoteExecutorAgent({
+        serviceUrl: config.distributedServiceUrl!,
+        serviceToken: config.distributedServiceToken!,
+        executorId: 'remote_beta',
+        hostId: 'remote-host-beta',
+        workerBinary,
+      })
 
   try {
     await alpha.start()
@@ -337,6 +376,7 @@ export async function runDistributedWorkerPlanePrototype(
       registered_executors: executors.map((executor) => executor.executorId),
       artifact_transport: config.artifactTransportMode,
       result_transport: 'object_store_service',
+      daemonized,
       remote_failover_observed:
         firstSnapshot.executor_id === 'remote_alpha' &&
         secondSnapshot.executor_id === 'remote_beta' &&

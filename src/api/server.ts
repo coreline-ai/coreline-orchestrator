@@ -51,6 +51,8 @@ export function createApp(dependencies: AppDependencies): Hono {
       config: dependencies.config,
       startedAt: dependencies.startedAt,
       version: dependencies.version ?? '0.4.0',
+      sessionManager: dependencies.sessionManager,
+      controlPlaneCoordinator: dependencies.controlPlaneCoordinator,
     }),
   )
   api.route(

@@ -23,6 +23,8 @@ interface RemoteExecutorAgentOptions {
   executorId: string
   hostId: string
   workerBinary: string
+  executorVersion?: string
+  executorLabels?: string[]
   executionModes?: ExecutionMode[]
   capabilityClasses?: WorkerCapabilityClass[]
   pollIntervalMs?: number
@@ -48,6 +50,7 @@ export class RemoteExecutorAgent {
   readonly #logCollector = new LogCollector()
   readonly #activeWorkers = new Map<string, ActiveRemoteWorker>()
   #started = false
+  #draining = false
   #pollTimer: ReturnType<typeof setInterval> | null = null
   #executorHeartbeatTimer: ReturnType<typeof setInterval> | null = null
   #claiming = false
@@ -55,6 +58,7 @@ export class RemoteExecutorAgent {
   constructor(options: RemoteExecutorAgentOptions) {
     this.#options = options
     this.#runtimeAdapter = new ProcessRuntimeAdapter({
+      deploymentProfile: 'production_service_stack',
       apiHost: '127.0.0.1',
       apiPort: 0,
       apiExposure: 'trusted_local',
@@ -99,6 +103,7 @@ export class RemoteExecutorAgent {
       return
     }
 
+    this.#draining = false
     await this.#controlPlane.registerExecutor({
       executorId: this.#options.executorId,
       hostId: this.#options.hostId,
@@ -110,6 +115,13 @@ export class RemoteExecutorAgent {
       },
       metadata: {
         capabilityClasses: (this.#options.capabilityClasses ?? ['read_only', 'write_capable']).join(','),
+        ...(this.#options.executorVersion === undefined
+          ? {}
+          : { executorVersion: this.#options.executorVersion }),
+        ...(this.#options.executorLabels === undefined ||
+        this.#options.executorLabels.length === 0
+          ? {}
+          : { executorLabels: this.#options.executorLabels.join(',') }),
       },
     })
 
@@ -146,11 +158,57 @@ export class RemoteExecutorAgent {
     )
 
     await this.#controlPlane.unregisterExecutor(this.#options.executorId).catch(() => false)
+    this.#draining = false
     this.#started = false
   }
 
+  async drain(): Promise<void> {
+    if (!this.#started || this.#draining) {
+      return
+    }
+
+    this.#draining = true
+    if (this.#pollTimer !== null) {
+      clearInterval(this.#pollTimer)
+      this.#pollTimer = null
+    }
+  }
+
+  async waitForIdle(timeoutMs = 30_000): Promise<void> {
+    const deadline = Date.now() + timeoutMs
+    while (this.#activeWorkers.size > 0) {
+      if (Date.now() >= deadline) {
+        throw new Error(
+          `Timed out waiting for remote executor ${this.#options.executorId} to become idle.`,
+        )
+      }
+
+      await Bun.sleep(25)
+    }
+  }
+
+  getStatus(): {
+    started: boolean
+    draining: boolean
+    activeWorkerCount: number
+    executorId: string
+    hostId: string
+  } {
+    return {
+      started: this.#started,
+      draining: this.#draining,
+      activeWorkerCount: this.#activeWorkers.size,
+      executorId: this.#options.executorId,
+      hostId: this.#options.hostId,
+    }
+  }
+
   async pollOnce(): Promise<boolean> {
-    if (this.#claiming || this.#activeWorkers.size >= (this.#options.maxConcurrentWorkers ?? 1)) {
+    if (
+      this.#draining ||
+      this.#claiming ||
+      this.#activeWorkers.size >= (this.#options.maxConcurrentWorkers ?? 1)
+    ) {
       return false
     }
 

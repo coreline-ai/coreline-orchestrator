@@ -8,6 +8,7 @@ import {
 } from '../core/errors.js'
 import { ensureDir } from '../storage/safeWrite.js'
 import type {
+  FileRuntimeSessionTransportSpec,
   PersistedRuntimeIdentity,
   RuntimeSessionAttachRequest,
   RuntimeSessionAttachResult,
@@ -79,7 +80,10 @@ export class SessionWorkerClientAdapter {
     spec: WorkerRuntimeSpec,
     orchestratorRootDir: string,
   ): Promise<RuntimeSessionTransportState> {
-    const transportSpec = createSessionTransportSpec(spec, orchestratorRootDir)
+    const transportSpec: FileRuntimeSessionTransportSpec = createSessionTransportSpec(
+      spec,
+      orchestratorRootDir,
+    )
     await ensureDir(transportSpec.rootDir)
     await Promise.all([
       touchFile(transportSpec.controlPath),
@@ -110,6 +114,7 @@ export class SessionWorkerClientAdapter {
     handle: SessionHandleInfo,
     request: RuntimeSessionAttachRequest,
   ): Promise<RuntimeSessionAttachResult> {
+    const transportSpec = assertFileTransportSpec(state.spec)
     const timestamp = new Date().toISOString()
     state.attachedSessionId = request.sessionId
     state.attachMode = request.mode ?? 'interactive'
@@ -117,7 +122,7 @@ export class SessionWorkerClientAdapter {
       state.transcriptCursor = structuredClone(request.cursor)
     }
 
-    await appendNdjson<SessionControlMessage>(state.spec.controlPath, {
+    await appendNdjson<SessionControlMessage>(transportSpec.controlPath, {
       type: 'attach',
       sessionId: request.sessionId,
       clientId: request.clientId,
@@ -126,14 +131,14 @@ export class SessionWorkerClientAdapter {
       timestamp,
     })
 
-    const identity = await this.#writeIdentityFile(state.spec.identityPath, {
+    const identity = await this.#writeIdentityFile(transportSpec.identityPath, {
       sessionId: request.sessionId,
       mode: 'session',
       transport: 'file_ndjson',
-      transportRootPath: state.spec.rootDir,
-      runtimeSessionId: state.spec.runtimeSessionId,
-      runtimeInstanceId: state.spec.runtimeInstanceId,
-      reattachToken: state.spec.reattachToken,
+      transportRootPath: transportSpec.rootDir,
+      runtimeSessionId: transportSpec.runtimeSessionId,
+      runtimeInstanceId: transportSpec.runtimeInstanceId,
+      reattachToken: transportSpec.reattachToken,
       processPid: handle.pid,
       startedAt: handle.startedAt,
       attachMode: request.mode ?? 'interactive',
@@ -151,6 +156,7 @@ export class SessionWorkerClientAdapter {
     state: RuntimeSessionTransportState,
     request: RuntimeSessionDetachRequest,
   ): Promise<void> {
+    const transportSpec = assertFileTransportSpec(state.spec)
     const sessionId =
       state.attachedSessionId ?? request.sessionId
     if (sessionId === undefined) {
@@ -161,7 +167,7 @@ export class SessionWorkerClientAdapter {
       )
     }
 
-    await appendNdjson<SessionControlMessage>(state.spec.controlPath, {
+    await appendNdjson<SessionControlMessage>(transportSpec.controlPath, {
       type: 'detach',
       sessionId,
       reason: request.reason,
@@ -175,7 +181,8 @@ export class SessionWorkerClientAdapter {
     state: RuntimeSessionTransportState,
     input: RuntimeSessionInput,
   ) {
-    await appendNdjson<SessionInputMessage>(state.spec.inputPath, {
+    const transportSpec = assertFileTransportSpec(state.spec)
+    await appendNdjson<SessionInputMessage>(transportSpec.inputPath, {
       type: 'input',
       sessionId: input.sessionId,
       data: input.data,
@@ -200,6 +207,7 @@ export class SessionWorkerClientAdapter {
       onOutput: (chunk: RuntimeSessionOutputChunk) => void | Promise<void>
     },
   ): Promise<RuntimeSessionOutputSubscription> {
+    const transportSpec = assertFileTransportSpec(state.spec)
     let closed = false
     let lastSequence =
       options.afterSequence ?? state.transcriptCursor.outputSequence ?? 0
@@ -213,7 +221,7 @@ export class SessionWorkerClientAdapter {
       pumping = true
       try {
         const chunks = await readOutputChunks(
-          state.spec.outputPath,
+          transportSpec.outputPath,
           options.sessionId,
           lastSequence,
         )
@@ -268,7 +276,9 @@ export class SessionWorkerClientAdapter {
       )
     }
 
-    const spec = await loadTransportSpecFromIdentity(request.identity)
+    const spec: FileRuntimeSessionTransportSpec = await loadTransportSpecFromIdentity(
+      request.identity,
+    )
     await ensureDir(spec.rootDir)
     await Promise.all([
       touchFile(spec.controlPath),
@@ -312,7 +322,7 @@ export class SessionWorkerClientAdapter {
 export function createSessionTransportSpec(
   spec: WorkerRuntimeSpec,
   orchestratorRootDir: string,
-): RuntimeSessionTransportSpec {
+): FileRuntimeSessionTransportSpec {
   const rootDir = resolve(
     spec.repoPath,
     orchestratorRootDir,
@@ -335,7 +345,7 @@ export function createSessionTransportSpec(
 
 async function loadTransportSpecFromIdentity(
   identity: PersistedRuntimeIdentity,
-): Promise<RuntimeSessionTransportSpec> {
+): Promise<FileRuntimeSessionTransportSpec> {
   const rootDir = identity.transportRootPath
   if (rootDir === undefined) {
     throw new SessionReattachFailedError(
@@ -425,4 +435,18 @@ async function touchFile(filePath: string): Promise<void> {
 
 function randomId(): string {
   return randomUUID().replaceAll('-', '')
+}
+
+function assertFileTransportSpec(
+  spec: RuntimeSessionTransportState['spec'],
+): FileRuntimeSessionTransportSpec {
+  if (spec.transport !== 'file_ndjson') {
+    throw new SessionTransportUnavailableError(
+      'unknown_session',
+      'read_output',
+      'file_ndjson_transport_expected',
+    )
+  }
+
+  return spec
 }

@@ -1,4 +1,7 @@
 <div align="center">
+
+<img width="2752" height="1536" alt="코어라인 오케스트레이터 주요 기능" src="https://github.com/user-attachments/assets/72fecda6-e295-4391-ab9a-ab1cacebbd18" />
+  
   <h1>🎛️ Coreline Orchestrator</h1>
   <p><strong>Multi-worker orchestration framework for CodexCode CLI</strong></p>
   <p>

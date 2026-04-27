@@ -16,6 +16,7 @@ import {
   runDistributedRealTaskExecutionProof,
   runRealTaskExecutionProof,
 } from './ops/realTask.js'
+import { runDeployGradeHttpSuite } from './ops/deployGradeHttpSuite.js'
 import { runSmokeScenario } from './ops/smoke.js'
 import type { ExecutionMode } from './core/models.js'
 import { requestCliApi, type CliApiClientOptions } from './cli/httpClient.js'
@@ -61,6 +62,7 @@ export type CliCommand =
   | { kind: 'readiness-production'; env: Record<string, string>; enforce: boolean }
   | { kind: 'remote-executor'; env: Record<string, string>; oneShot: boolean }
   | { kind: 'real-task-proof'; distributed: boolean; workerBinary?: string; keepTemp: boolean; timeoutSeconds?: number }
+  | { kind: 'deploy-grade-http-suite'; workerBinary?: string; keepTemp: boolean; timeoutSeconds?: number; iterations?: number; outputRoot?: string }
   | ApiProxyCommand
 
 export function parseCliCommand(argv: string[]): CliCommand {
@@ -123,6 +125,17 @@ export function parseCliCommand(argv: string[]): CliCommand {
       workerBinary: flags['worker-binary'],
       keepTemp: isTruthy(flags['keep-temp']),
       timeoutSeconds: parsePositiveInteger(flags['timeout-seconds']),
+    }
+  }
+
+  if (command === 'proof' && subcommand === 'deploy-grade-http-suite') {
+    return {
+      kind: 'deploy-grade-http-suite',
+      workerBinary: flags['worker-binary'],
+      keepTemp: isTruthy(flags['keep-temp']),
+      timeoutSeconds: parsePositiveInteger(flags['timeout-seconds']),
+      iterations: parsePositiveInteger(flags.iterations),
+      outputRoot: flags['output-root'],
     }
   }
 
@@ -381,6 +394,9 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
     case 'real-task-proof':
       await runRealTaskProof(command)
       return
+    case 'deploy-grade-http-suite':
+      await runDeployGradeHttpSuiteCommand(command)
+      return
     case 'api-proxy':
       await runApiProxy(command)
       return
@@ -504,6 +520,20 @@ async function runRealTaskProof(command: Extract<CliCommand, { kind: 'real-task-
   }
 }
 
+async function runDeployGradeHttpSuiteCommand(command: Extract<CliCommand, { kind: 'deploy-grade-http-suite' }>): Promise<void> {
+  const result = await runDeployGradeHttpSuite({
+    workerBinary: command.workerBinary,
+    keepTemp: command.keepTemp,
+    timeoutSeconds: command.timeoutSeconds,
+    iterations: command.iterations,
+    outputRoot: command.outputRoot,
+  })
+  console.log(JSON.stringify(result, null, 2))
+  if (!result.suitePassed) {
+    process.exit(1)
+  }
+}
+
 async function runApiProxy(command: ApiProxyCommand): Promise<void> {
   const result = await requestCliApi(
     command.path,
@@ -532,6 +562,7 @@ Core
   smoke real|success|timeout [--worker-binary PATH] [--execution-mode process|session] [--verify-session-flow] [--verify-session-reattach]
   preflight real-smoke [--binary codexcode]
   proof real-task [local|distributed] [--worker-binary codexcode] [--keep-temp]
+  proof deploy-grade-http-suite [--worker-binary codexcode] [--iterations 3] [--output-root PATH] [--keep-temp]
   readiness production [--profile production_service_stack] [--enforce]
   remote-executor [--service-url URL] [--service-token TOKEN] [--executor-id ID] [--host-id ID] [--oneshot]
   version
@@ -570,7 +601,8 @@ Examples
   bun dist/cli.js jobs create --base-url http://127.0.0.1:4310/api/v1 --repo-path /repo --title "Fix bug" --prompt "Investigate and fix"
   bun dist/cli.js smoke real --worker-binary codexcode --execution-mode session --verify-session-flow --verify-session-reattach
   bun dist/cli.js proof real-task --worker-binary codexcode
-  bun dist/cli.js proof real-task distributed --worker-binary codexcode`)
+  bun dist/cli.js proof real-task distributed --worker-binary codexcode
+  bun dist/cli.js proof deploy-grade-http-suite --worker-binary codexcode --iterations 3 --output-root /tmp/deploy-grade-suite`)
 }
 function parseArgv(argv: string[]): ParsedArgv {
   const positionals: string[] = []

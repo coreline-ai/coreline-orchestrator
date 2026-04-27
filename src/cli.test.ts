@@ -97,6 +97,28 @@ describe('cli parser', () => {
     })
   })
 
+
+  test('parses deploy-grade http suite proof command', () => {
+    const command = parseCliCommand([
+      'proof',
+      'deploy-grade-http-suite',
+      '--worker-binary',
+      'codexcode',
+      '--iterations',
+      '2',
+      '--output-root',
+      '/tmp/deploy-grade',
+      '--keep-temp',
+    ])
+
+    expect(command.kind).toBe('deploy-grade-http-suite')
+    if (command.kind !== 'deploy-grade-http-suite') throw new Error('expected deploy-grade proof command')
+    expect(command.workerBinary).toBe('codexcode')
+    expect(command.iterations).toBe(2)
+    expect(command.outputRoot).toBe('/tmp/deploy-grade')
+    expect(command.keepTemp).toBe(true)
+  })
+
   test('parses proof command', () => {
     const command = parseCliCommand([
       'proof',

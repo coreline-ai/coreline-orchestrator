@@ -18,6 +18,7 @@ import { createEventsRouter } from './routes/events.js'
 import { createHealthRouter } from './routes/health.js'
 import { createInternalRouter } from './routes/internal.js'
 import { createJobsRouter } from './routes/jobs.js'
+import { createHarnessPlaygroundRouter } from './routes/harnessPlaygrounds.js'
 import { createRealtimeRouter } from './routes/realtime.js'
 import { createSessionsRouter } from './routes/sessions.js'
 import { createWorkersRouter } from './routes/workers.js'
@@ -143,6 +144,7 @@ export function createApp(dependencies: AppDependencies): Hono {
     }),
   )
 
+  app.route('/', createHarnessPlaygroundRouter({ version: dependencies.version ?? '0.4.0' }))
   app.route('/api/v1', api)
   app.route('/internal/v1', internal)
   return app

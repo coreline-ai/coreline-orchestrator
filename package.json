@@ -47,6 +47,7 @@
     "ops:verify:rc": "bun ./scripts/run-ops-deep-check.ts --mode release-candidate --success-worker-binary ./scripts/fixtures/smoke-success-worker.sh --timeout-worker-binary ./scripts/fixtures/smoke-timeout-worker.sh --iterations 2",
     "ops:proof:real-task": "bun ./src/cli.ts proof real-task --worker-binary codexcode",
     "ops:proof:real-task:distributed": "bun ./src/cli.ts proof real-task distributed --worker-binary codexcode",
+    "ops:proof:deploy-grade-http-suite": "bun ./src/cli.ts proof deploy-grade-http-suite --worker-binary codexcode --iterations 3",
     "ops:readiness:production": "ORCH_DEPLOYMENT_PROFILE=production_service_stack bun ./scripts/run-production-readiness.ts --enforce",
     "ops:providers:cutover": "bun ./scripts/run-provider-cutover.ts",
     "ops:dr:plan": "bun ./scripts/run-disaster-recovery-plan.ts",

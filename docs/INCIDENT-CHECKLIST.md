@@ -1,3 +1,5 @@
+> Template note: 이 문서의 체크박스는 구현 미완 항목이 아니라 **incident 대응용 운영 체크리스트**다.
+
 # Incident Checklist
 
 ## 1. Initial Triage

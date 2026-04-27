@@ -1,3 +1,5 @@
+> Status note: 이 문서는 초기 구현 청사진을 보존한 **archive reference**다. 아래 체크박스는 현재 프로젝트 완료 상태를 나타내지 않는다. 현재 상태는 README / OPERATIONS / 최신 shipped code를 기준으로 판단한다.
+
 # Implementation Plan: Coreline Orchestrator
 
 > CodexCode CLI worker를 관리하는 커스텀 오케스트레이션 프레임워크의 상세 구현계획서

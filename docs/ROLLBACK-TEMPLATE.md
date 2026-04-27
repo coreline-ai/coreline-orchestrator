@@ -1,3 +1,5 @@
+> Template note: 이 문서의 체크박스는 구현 미완 항목이 아니라 **rollback 실행 기록 템플릿**이다.
+
 # Rollback Template
 
 - Date:
